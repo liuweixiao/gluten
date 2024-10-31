@@ -1,20 +1,26 @@
 #!/bin/bash
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -exu
 
 VELOX_REPO=https://github.com/oap-project/velox.git
-VELOX_BRANCH=main
+VELOX_BRANCH=2024_10_31
 VELOX_HOME=""
 
-#Set on run gluten on HDFS
-ENABLE_HDFS=OFF
-#It can be set to OFF when compiling velox again
-BUILD_PROTOBUF=ON
-#Set on run gluten on S3
-ENABLE_S3=OFF
-
-LINUX_DISTRIBUTION=$(. /etc/os-release && echo ${ID})
-LINUX_VERSION_ID=$(. /etc/os-release && echo ${VERSION_ID})
+OS=`uname -s`
 
 for arg in "$@"; do
   case $arg in
@@ -30,18 +36,6 @@ for arg in "$@"; do
     VELOX_HOME=("${arg#*=}")
     shift # Remove argument name from processing
     ;;
-  --build_protobuf=*)
-    BUILD_PROTOBUF=("${arg#*=}")
-    shift # Remove argument name from processing
-    ;;
-  --enable_hdfs=*)
-    ENABLE_HDFS=("${arg#*=}")
-    shift # Remove argument name from processing
-    ;;
-  --enable_s3=*)
-    ENABLE_S3=("${arg#*=}")
-    shift # Remove argument name from processing
-    ;;
   *)
     OTHER_ARGUMENTS+=("$1")
     shift # Remove generic argument from processing
@@ -49,97 +43,108 @@ for arg in "$@"; do
   esac
 done
 
+function ensure_pattern_matched {
+  if [ $# -ne 2 ]; then
+    echo "Exactly 2 arguments are required."
+    return 1
+  fi
+  pattern=$1
+  file=$2
+  matched_lines=$(grep -c "$pattern" $file)
+  if [ $matched_lines -eq 0 ]; then
+    return 1
+  fi
+}
+
 function process_setup_ubuntu {
-  # make this function Reentrantly
+  if [ -z "$(which git)" ]; then
+    sudo --preserve-env apt install -y git
+  fi
+  # make this function Reentrant
   git checkout scripts/setup-ubuntu.sh
-  sed -i '/libprotobuf-dev/d' scripts/setup-ubuntu.sh
-  sed -i '/protobuf-compiler/d' scripts/setup-ubuntu.sh
-  sed -i '/^sudo --preserve-env apt update && sudo apt install -y/a\  *thrift* \\' scripts/setup-ubuntu.sh
-  sed -i '/^sudo --preserve-env apt update && sudo apt install -y/a\  libiberty-dev \\' scripts/setup-ubuntu.sh
-  sed -i '/^sudo --preserve-env apt update && sudo apt install -y/a\  libxml2-dev \\' scripts/setup-ubuntu.sh
-  sed -i '/^sudo --preserve-env apt update && sudo apt install -y/a\  libkrb5-dev \\' scripts/setup-ubuntu.sh
-  sed -i '/^sudo --preserve-env apt update && sudo apt install -y/a\  libgsasl7-dev \\' scripts/setup-ubuntu.sh
-  sed -i '/^sudo --preserve-env apt update && sudo apt install -y/a\  libuuid1 \\' scripts/setup-ubuntu.sh
-  sed -i '/^sudo --preserve-env apt update && sudo apt install -y/a\  uuid-dev \\' scripts/setup-ubuntu.sh
-  sed -i 's/^  liblzo2-dev.*/  liblzo2-dev \\/g' scripts/setup-ubuntu.sh
-  sed -i '/libre2-dev/d' scripts/setup-ubuntu.sh
+
+  # No need to re-install git.
+  ensure_pattern_matched 'git ' scripts/setup-ubuntu.sh
+  sed -i '/git \\/d' scripts/setup-ubuntu.sh
+  # Do not install libunwind which can cause interruption when catching native exception.
+  ensure_pattern_matched '\${SUDO} apt install -y libunwind-dev' scripts/setup-ubuntu.sh
+  sed -i 's/${SUDO} apt install -y libunwind-dev//' scripts/setup-ubuntu.sh
+  # Overwrite gcc installed by build-essential.
+  ensure_pattern_matched '\${SUDO} pip3 install cmake==3.28.3' scripts/setup-ubuntu.sh
+  sed -i '/^  ${SUDO} pip3 install cmake==3.28.3/a\
+  \VERSION=`cat /etc/os-release | grep VERSION_ID`\
+  if [[ $VERSION =~ "20.04" ]]; then\
+    sudo apt install -y software-properties-common\
+    sudo add-apt-repository ppa:ubuntu-toolchain-r/test\
+    sudo apt update && sudo apt install -y gcc-11 g++-11\
+    sudo ln -sf /usr/bin/gcc-11 /usr/bin/gcc\
+    sudo ln -sf /usr/bin/g++-11 /usr/bin/g++\
+  fi' scripts/setup-ubuntu.sh
+  ensure_pattern_matched 'ccache' scripts/setup-ubuntu.sh
+  sed -i '/ccache/a\    *thrift* \\' scripts/setup-ubuntu.sh
+  sed -i '/ccache/a\    libiberty-dev \\' scripts/setup-ubuntu.sh
+  sed -i '/ccache/a\    libxml2-dev \\' scripts/setup-ubuntu.sh
+  sed -i '/ccache/a\    libkrb5-dev \\' scripts/setup-ubuntu.sh
+  sed -i '/ccache/a\    libgsasl7-dev \\' scripts/setup-ubuntu.sh
+  sed -i '/ccache/a\    libuuid1 \\' scripts/setup-ubuntu.sh
+  sed -i '/ccache/a\    uuid-dev \\' scripts/setup-ubuntu.sh
+  ensure_pattern_matched 'libgmock-dev' scripts/setup-ubuntu.sh
   sed -i '/libgmock-dev/d' scripts/setup-ubuntu.sh # resolved by ep/build-velox/build/velox_ep/CMake/resolve_dependency_modules/gtest.cmake
-  if [ $ENABLE_HDFS == "ON" ]; then
-    sed -i '/^function install_fmt.*/i function install_libhdfs3 {\n  github_checkout oap-project/libhdfs3 master \n cmake_install\n}\n' scripts/setup-ubuntu.sh
-    sed -i '/^  run_and_time install_fmt/a \ \ run_and_time install_libhdfs3' scripts/setup-ubuntu.sh
-    sed -i '/^sudo --preserve-env apt update && sudo apt install -y/a\  yasm \\' scripts/setup-ubuntu.sh
-  fi
-  if [ $BUILD_PROTOBUF == "ON" ]; then
-    sed -i '/^function install_fmt.*/i function install_protobuf {\n  wget https://github.com/protocolbuffers/protobuf/releases/download/v21.4/protobuf-all-21.4.tar.gz\n  tar -xzf protobuf-all-21.4.tar.gz\n  cd protobuf-21.4\n  ./configure  CXXFLAGS="-fPIC"  --prefix=/usr/local\n  make "-j$(nproc)"\n  sudo make install\n  sudo ldconfig\n}\n' scripts/setup-ubuntu.sh
-    sed -i '/^  run_and_time install_fmt/a \ \ run_and_time install_protobuf' scripts/setup-ubuntu.sh
-  fi
-  if [ $ENABLE_S3 == "ON" ]; then
-    sed -i '/^function install_fmt.*/i function install_awssdk {\n  github_checkout aws/aws-sdk-cpp 1.9.379 --depth 1 --recurse-submodules\n  cmake_install -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS:BOOL=OFF -DMINIMIZE_SIZE:BOOL=ON -DENABLE_TESTING:BOOL=OFF -DBUILD_ONLY:STRING="s3;identity-management" \n} \n' scripts/setup-ubuntu.sh
-    sed -i '/^  run_and_time install_fmt/a \ \ run_and_time install_awssdk' scripts/setup-ubuntu.sh
-  fi
-  sed -i 's/run_and_time install_conda/#run_and_time install_conda/' scripts/setup-ubuntu.sh
-
+  # Required by lib hdfs.
+  ensure_pattern_matched 'ccache ' scripts/setup-ubuntu.sh
+  sed -i '/ccache /a\    yasm \\' scripts/setup-ubuntu.sh
+  ensure_pattern_matched 'run_and_time install_conda' scripts/setup-ubuntu.sh
+  sed -i '/run_and_time install_conda/d' scripts/setup-ubuntu.sh
+  # Just depends on Gluten to install arrow libs since Gluten requires some patches are applied and some different build options are used.
+  ensure_pattern_matched 'run_and_time install_arrow' scripts/setup-ubuntu.sh
+  sed -i '/run_and_time install_arrow/d' scripts/setup-ubuntu.sh
 }
 
-function process_setup_centos8 {
-  # make this function Reentrantly
-  git checkout scripts/setup-centos8.sh
-  sed -i '/^function dnf_install/i\DEPENDENCY_DIR=${DEPENDENCY_DIR:-$(pwd)}' scripts/setup-centos8.sh
-  sed -i '/^dnf_install autoconf/a\dnf_install libxml2-devel libgsasl-devel libuuid-devel' scripts/setup-centos8.sh
-
-  # install gtest
-  sed -i '/^cmake_install_deps fmt/a \ \ install_gtest' scripts/setup-centos8.sh
-  sed -i '/^cmake_install_deps fmt/a \install_folly' scripts/setup-centos8.sh
-
-  if [ $ENABLE_HDFS == "ON" ]; then
-    sed -i '/^function install_protobuf.*/i function install_libhdfs3 {\n cd "\${DEPENDENCY_DIR}"\n github_checkout oap-project/libhdfs3 master \n cmake_install\n}\n' scripts/setup-centos8.sh
-    sed -i '/^cmake_install_deps fmt/a \ \ install_libhdfs3' scripts/setup-centos8.sh
-    sed -i '/^dnf_install ninja-build/a\ \ yasm \\' scripts/setup-centos8.sh
+function process_setup_centos9 {
+  # Allows other version of git already installed.
+  if [ -z "$(which git)" ]; then
+    dnf install -y -q --setopt=install_weak_deps=False git
   fi
-  if [[ $BUILD_PROTOBUF == "ON" ]] || [[ $ENABLE_HDFS == "ON" ]]; then
-    sed -i '/^cmake_install_deps fmt/a \ \ install_protobuf' scripts/setup-centos8.sh
-  fi
-  if [ $ENABLE_S3 == "ON" ]; then
-    sed -i '/^cmake_install_deps fmt/a \ \ install_awssdk' scripts/setup-centos8.sh
-  fi
-}
+  # make this function Reentrant
+  git checkout scripts/setup-centos9.sh
+  # No need to re-install git.
 
-function process_setup_centos7 {
-  # make this function Reentrantly
-  git checkout scripts/setup-centos7.sh
+  ensure_pattern_matched 'dnf_install' scripts/setup-centos9.sh
+  sed -i 's/dnf_install ninja-build cmake curl ccache gcc-toolset-12 git/dnf_install ninja-build cmake curl ccache gcc-toolset-12/' scripts/setup-centos9.sh
+  sed -i '/^.*dnf_install autoconf/a\  dnf_install libxml2-devel libgsasl-devel libuuid-devel' scripts/setup-centos9.sh
+  
+  ensure_pattern_matched 'install_gflags' scripts/setup-centos9.sh
+  sed -i '/^function install_gflags.*/i function install_openssl {\n  wget_and_untar https://github.com/openssl/openssl/releases/download/openssl-3.2.2/openssl-3.2.2.tar.gz openssl \n ( cd ${DEPENDENCY_DIR}/openssl \n  ./config no-shared && make depend && make && sudo make install ) \n}\n'     scripts/setup-centos9.sh
 
-  # cmake 3 and ninja should be installed
-  sed -i '/^run_and_time install_cmake/d' scripts/setup-centos7.sh
-  sed -i '/^run_and_time install_ninja/d' scripts/setup-centos7.sh
+  ensure_pattern_matched 'install_fbthrift' scripts/setup-centos9.sh
+  sed -i '/^  run_and_time install_fbthrift/a \  run_and_time install_openssl' scripts/setup-centos9.sh
 
-  # install gtest
-  sed -i '/^  run_and_time install_fmt/a \ \ run_and_time install_gtest' scripts/setup-centos7.sh
+  # Required by lib hdfs.
+  ensure_pattern_matched 'dnf_install ninja-build' scripts/setup-centos9.sh
+  sed -i '/^  dnf_install ninja-build/a\  dnf_install yasm\' scripts/setup-centos9.sh
 
-  if [ $ENABLE_HDFS = "ON" ]; then
-    sed -i '/^function install_protobuf.*/i function install_libhdfs3 {\n cd "\${DEPENDENCY_DIR}"\n github_checkout oap-project/libhdfs3 master \n cmake_install\n}\n' scripts/setup-centos7.sh
-    sed -i '/^  run_and_time install_fmt/a \ \ run_and_time install_libhdfs3' scripts/setup-centos7.sh
-    sed -i '/^dnf_install ccache/a\ \ yasm \\' scripts/setup-centos7.sh
-  fi
-  if [[ $BUILD_PROTOBUF == "ON" ]] || [[ $ENABLE_HDFS == "ON" ]]; then
-    sed -i '/^  run_and_time install_fmt/a \ \ run_and_time install_protobuf' scripts/setup-centos7.sh
-  fi
-  if [ $ENABLE_S3 == "ON" ]; then
-    sed -i '/^  run_and_time install_fmt/a \ \ run_and_time install_awssdk' scripts/setup-centos7.sh
-  fi
+  # Just depends on Gluten to install arrow libs since Gluten requires some patches are applied and some different build options are used.
+  ensure_pattern_matched 'run_and_time install_arrow' scripts/setup-centos9.sh
+  sed -i '/run_and_time install_arrow/d' scripts/setup-centos9.sh
 }
 
 function process_setup_alinux3 {
-  process_setup_centos8
-  sed -i "s/.*dnf_install epel-release/#&/" scripts/setup-centos8.sh
-  sed -i "s/.*dnf config-manager --set-enabled powertools/#&/" scripts/setup-centos8.sh
-  sed -i "s/gcc-toolset-9 //" scripts/setup-centos8.sh
-  sed -i "s/.*source \/opt\/rh\/gcc-toolset-9\/enable/#&/" scripts/setup-centos8.sh
-  sed -i "s/\${CMAKE_INSTALL_LIBDIR}/lib64/" third_party/CMakeLists.txt
+  sed -i "s/.*dnf_install epel-release/#&/" ${CURRENT_DIR}/setup-centos8.sh
+  sed -i "s/.*run_and_time install_conda/#&/" ${CURRENT_DIR}/setup-centos8.sh
+  sed -i "s/.*dnf config-manager --set-enabled powertools/#&/" ${CURRENT_DIR}/setup-centos8.sh
+  sed -i "s/gcc-toolset-11 //" ${CURRENT_DIR}/setup-centos8.sh
+  sed -i "s/.*source \/opt\/rh\/gcc-toolset-11\/enable/#&/" ${CURRENT_DIR}/setup-centos8.sh
+  sed -i 's|^export CC=/opt/rh/gcc-toolset-11/root/bin/gcc|# &|' ${CURRENT_DIR}/setup-centos8.sh
+  sed -i 's|^export CXX=/opt/rh/gcc-toolset-11/root/bin/g++|# &|' ${CURRENT_DIR}/setup-centos8.sh
+  sed -i 's/python39 python39-devel python39-pip //g' ${CURRENT_DIR}/setup-centos8.sh
+  sed -i "s/.*pip.* install/#&/" ${CURRENT_DIR}/setup-centos8.sh
+}
+
+function process_setup_tencentos32 {
+  sed -i "s/.*dnf config-manager --set-enabled powertools/#&/" ${CURRENT_DIR}/setup-centos8.sh
 }
 
 echo "Preparing Velox source code..."
-echo "ENABLE_HDFS=${ENABLE_HDFS}"
-echo "BUILD_PROTOBUF=${BUILD_PROTOBUF}"
 
 CURRENT_DIR=$(
   cd "$(dirname "$BASH_SOURCE")"
@@ -152,7 +157,7 @@ fi
 VELOX_SOURCE_DIR="${VELOX_HOME}"
 
 # checkout code
-TARGET_BUILD_COMMIT="$(git ls-remote $VELOX_REPO $VELOX_BRANCH | awk '{print $1;}')"
+TARGET_BUILD_COMMIT="$(git ls-remote $VELOX_REPO $VELOX_BRANCH | awk '{print $1;}' | head -n 1)"
 if [ -d $VELOX_SOURCE_DIR ]; then
   echo "Velox source folder $VELOX_SOURCE_DIR already exists..."
   cd $VELOX_SOURCE_DIR
@@ -172,31 +177,76 @@ fi
 git submodule sync --recursive
 git submodule update --init --recursive
 
-# apply patches
-sed -i 's/^  ninja -C "${BINARY_DIR}" install/  sudo ninja -C "${BINARY_DIR}" install/g' scripts/setup-helper-functions.sh
-sed -i 's/-mavx2 -mfma -mavx -mf16c -mlzcnt -std=c++17/-march=native -std=c++17 -mno-avx512f/g' scripts/setup-helper-functions.sh
-if [[ "$LINUX_DISTRIBUTION" == "ubuntu" || "$LINUX_DISTRIBUTION" == "debian" || "$LINUX_DISTRIBUTION" == "pop" ]]; then
-  process_setup_ubuntu
-elif [[ "$LINUX_DISTRIBUTION" == "centos" ]]; then
-  case "$LINUX_VERSION_ID" in
-    8) process_setup_centos8 ;;
-    7) process_setup_centos7 ;;
-    *)
-      echo "Unsupport centos version: $LINUX_VERSION_ID"
-      exit 1
-    ;;
-  esac
-elif [[ "$LINUX_DISTRIBUTION" == "alinux" ]]; then
-  case "$LINUX_VERSION_ID" in
-    3) process_setup_alinux3 ;;
-    *)
-      echo "Unsupport alinux version: $LINUX_VERSION_ID"
-      exit 1
-    ;;
-  esac
+function apply_compilation_fixes {
+  current_dir=$1
+  velox_home=$2
+  sudo cp ${current_dir}/modify_velox.patch ${velox_home}/
+  sudo cp ${current_dir}/modify_arrow.patch ${velox_home}/CMake/resolve_dependency_modules/arrow/
+  sudo cp ${current_dir}/modify_arrow_dataset_scan_option.patch ${velox_home}/CMake/resolve_dependency_modules/arrow/
+  git add ${velox_home}/modify_velox.patch # to avoid the file from being deleted by git clean -dffx :/
+  git add ${velox_home}/CMake/resolve_dependency_modules/arrow/modify_arrow.patch # to avoid the file from being deleted by git clean -dffx :/
+  git add ${velox_home}/CMake/resolve_dependency_modules/arrow/modify_arrow_dataset_scan_option.patch # to avoid the file from being deleted by git clean -dffx :/
+  cd ${velox_home}
+  echo "Applying patch to Velox source code..."
+  git apply modify_velox.patch
+  if [ $? -ne 0 ]; then
+    echo "Failed to apply compilation fixes to Velox: $?."
+    exit 1
+  fi
+}
+
+function setup_linux {
+  local LINUX_DISTRIBUTION=$(. /etc/os-release && echo ${ID})
+  local LINUX_VERSION_ID=$(. /etc/os-release && echo ${VERSION_ID})
+
+  # apply patches
+  sed -i 's/-mavx2 -mfma -mavx -mf16c -mlzcnt -std=c++17/-march=native -std=c++17 -mno-avx512f/g' scripts/setup-helper-functions.sh
+  sed -i 's/SUDO="${SUDO:-""}"/SUDO="${SUDO:-"sudo --preserve-env"}"/g' scripts/setup-helper-functions.sh
+  if [[ "$LINUX_DISTRIBUTION" == "ubuntu" || "$LINUX_DISTRIBUTION" == "debian" || "$LINUX_DISTRIBUTION" == "pop" ]]; then
+    process_setup_ubuntu
+  elif [[ "$LINUX_DISTRIBUTION" == "centos" ]]; then
+    case "$LINUX_VERSION_ID" in
+      9) process_setup_centos9 ;;
+      8) ;;
+      7) ;;
+      *)
+        echo "Unsupported centos version: $LINUX_VERSION_ID"
+        exit 1
+      ;;
+    esac
+  elif [[ "$LINUX_DISTRIBUTION" == "alinux" ]]; then
+    case "${LINUX_VERSION_ID:0:1}" in
+      2) ;;
+      3) process_setup_alinux3 ;;
+      *)
+        echo "Unsupported alinux version: $LINUX_VERSION_ID"
+        exit 1
+      ;;
+    esac
+  elif [[ "$LINUX_DISTRIBUTION" == "tencentos" ]]; then
+    case "$LINUX_VERSION_ID" in
+      2.4) ;;
+      3.2) process_setup_tencentos32 ;;
+      *)
+        echo "Unsupported tencentos version: $LINUX_VERSION_ID"
+        exit 1
+      ;;
+    esac
+  else
+    echo "Unsupported linux distribution: $LINUX_DISTRIBUTION"
+    exit 1
+  fi
+}
+
+if [ $OS == 'Linux' ]; then
+  setup_linux
+elif [ $OS == 'Darwin' ]; then
+  :
 else
-  echo "Unsupport linux distribution: $LINUX_DISTRIBUTION"
+  echo "Unsupported kernel: $OS"
   exit 1
 fi
 
-echo "Velox-get finished."
+apply_compilation_fixes $CURRENT_DIR $VELOX_SOURCE_DIR
+
+echo "Finished getting Velox code"

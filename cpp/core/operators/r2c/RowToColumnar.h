@@ -19,23 +19,19 @@
 
 #include <arrow/c/abi.h>
 #include "memory/ColumnarBatch.h"
-#include "utils/exception.h"
+#include "utils/Exception.h"
 
 namespace gluten {
 
 class RowToColumnarConverter {
  public:
-  RowToColumnarConverter(struct ArrowSchema* cSchema) {}
+  RowToColumnarConverter() {}
 
   virtual ~RowToColumnarConverter() = default;
 
   virtual std::shared_ptr<ColumnarBatch> convert(int64_t numRows, int64_t* rowLength, uint8_t* memoryAddress) {
     throw GlutenException("Not implement row to column");
-  };
-
- protected:
-  // Check whether support AVX512 instructions
-  bool supportAvx512_;
+  }
 };
 
 } // namespace gluten

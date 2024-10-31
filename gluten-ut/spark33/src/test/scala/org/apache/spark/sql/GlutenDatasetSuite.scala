@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql
 
 import org.apache.spark.sql.execution.ColumnarShuffleExchangeExec
@@ -22,28 +21,33 @@ import org.apache.spark.sql.execution.ColumnarShuffleExchangeExec
 class GlutenDatasetSuite extends DatasetSuite with GlutenSQLTestsTrait {
   import testImplicits._
 
-  test("Gluten: dropDuplicates: columns with same column name") {
+  testGluten("dropDuplicates: columns with same column name") {
     val ds1 = Seq(("a", 1), ("a", 2), ("b", 1), ("a", 1)).toDS()
     val ds2 = Seq(("a", 1), ("a", 2), ("b", 1), ("a", 1)).toDS()
     // The dataset joined has two columns of the same name "_2".
     val joined = ds1.join(ds2, "_1").select(ds1("_2").as[Int], ds2("_2").as[Int])
     // Using the checkDatasetUnorderly method to sort the result in Gluten.
-    checkDatasetUnorderly(
-      joined.dropDuplicates(),
-      (1, 2), (1, 1), (2, 1), (2, 2))
+    checkDatasetUnorderly(joined.dropDuplicates(), (1, 2), (1, 1), (2, 1), (2, 2))
   }
 
-  test("Gluten: groupBy.as") {
-    val df1 = Seq(DoubleData(1, "one"), DoubleData(2, "two"), DoubleData(3, "three")).toDS()
-      .repartition($"id").sortWithinPartitions("id")
-    val df2 = Seq(DoubleData(5, "one"), DoubleData(1, "two"), DoubleData(3, "three")).toDS()
-      .repartition($"id").sortWithinPartitions("id")
+  testGluten("groupBy.as") {
+    val df1 = Seq(DoubleData(1, "one"), DoubleData(2, "two"), DoubleData(3, "three"))
+      .toDS()
+      .repartition($"id")
+      .sortWithinPartitions("id")
+    val df2 = Seq(DoubleData(5, "one"), DoubleData(1, "two"), DoubleData(3, "three"))
+      .toDS()
+      .repartition($"id")
+      .sortWithinPartitions("id")
 
-    val df3 = df1.groupBy("id").as[Int, DoubleData]
-      .cogroup(df2.groupBy("id").as[Int, DoubleData]) { case (key, data1, data2) =>
-        if (key == 1) {
-          Iterator(DoubleData(key, (data1 ++ data2).foldLeft("")((cur, next) => cur + next.val1)))
-        } else Iterator.empty
+    val df3 = df1
+      .groupBy("id")
+      .as[Int, DoubleData]
+      .cogroup(df2.groupBy("id").as[Int, DoubleData]) {
+        case (key, data1, data2) =>
+          if (key == 1) {
+            Iterator(DoubleData(key, (data1 ++ data2).foldLeft("")((cur, next) => cur + next.val1)))
+          } else Iterator.empty
       }
     checkDataset(df3, DoubleData(1, "onetwo"))
 

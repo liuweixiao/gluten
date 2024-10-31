@@ -1,16 +1,33 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include <Columns/ColumnSet.h>
+#include <DataTypes/DataTypeFactory.h>
 #include <DataTypes/DataTypeSet.h>
 #include <Functions/FunctionFactory.h>
 #include <Interpreters/Set.h>
-#include <Parser/SerializedPlanParser.h>
 #include <gtest/gtest.h>
 #include <Common/DebugUtils.h>
+#include <Common/QueryContext.h>
 
 TEST(TestFuntion, Hash)
 {
     using namespace DB;
     auto & factory = FunctionFactory::instance();
-    auto function = factory.get("murmurHash2_64", local_engine::SerializedPlanParser::global_context);
+    auto function = factory.get("murmurHash2_64", local_engine::QueryContext::globalContext());
     auto type0 = DataTypeFactory::instance().get("String");
     auto column0 = type0->createColumn();
     column0->insert("A");
@@ -40,7 +57,7 @@ TEST(TestFunction, In)
 {
     using namespace DB;
     auto & factory = FunctionFactory::instance();
-    auto function = factory.get("in", local_engine::SerializedPlanParser::global_context);
+    auto function = factory.get("in", local_engine::QueryContext::globalContext());
     auto type0 = DataTypeFactory::instance().get("String");
     auto type_set = std::make_shared<DataTypeSet>();
 
@@ -63,7 +80,8 @@ TEST(TestFunction, In)
     set->insertFromBlock(col1_set_block.getColumnsWithTypeAndName());
     set->finishInsert();
     auto future_set = std::make_shared<FutureSetFromStorage>(std::move(set));
-    auto arg = ColumnSet::create(1, future_set);
+    //TODO: WHY? after https://github.com/ClickHouse/ClickHouse/pull/63723 we need pass 4 instead of 1
+    auto arg = ColumnSet::create(4, future_set);
 
     ColumnsWithTypeAndName columns
         = {ColumnWithTypeAndName(std::move(column1), type0, "string0"), ColumnWithTypeAndName(std::move(arg), type_set, "__set")};
@@ -82,7 +100,7 @@ TEST(TestFunction, NotIn1)
 {
     using namespace DB;
     auto & factory = FunctionFactory::instance();
-    auto function = factory.get("notIn", local_engine::SerializedPlanParser::global_context);
+    auto function = factory.get("notIn", local_engine::QueryContext::globalContext());
     auto type0 = DataTypeFactory::instance().get("String");
     auto type_set = std::make_shared<DataTypeSet>();
 
@@ -105,7 +123,9 @@ TEST(TestFunction, NotIn1)
     set->insertFromBlock(col1_set_block.getColumnsWithTypeAndName());
     set->finishInsert();
     auto future_set = std::make_shared<FutureSetFromStorage>(std::move(set));
-    auto arg = ColumnSet::create(1,future_set);
+
+    //TODO: WHY? after https://github.com/ClickHouse/ClickHouse/pull/63723 we need pass 4 instead of 1
+    auto arg = ColumnSet::create(4, future_set);
 
     ColumnsWithTypeAndName columns
         = {ColumnWithTypeAndName(std::move(column1), type0, "string0"), ColumnWithTypeAndName(std::move(arg), type_set, "__set")};
@@ -123,7 +143,7 @@ TEST(TestFunction, NotIn2)
 {
     using namespace DB;
     auto & factory = FunctionFactory::instance();
-    auto function = factory.get("in", local_engine::SerializedPlanParser::global_context);
+    auto function = factory.get("in", local_engine::QueryContext::globalContext());
     auto type0 = DataTypeFactory::instance().get("String");
     auto type_set = std::make_shared<DataTypeSet>();
 
@@ -146,7 +166,9 @@ TEST(TestFunction, NotIn2)
     set->insertFromBlock(col1_set_block.getColumnsWithTypeAndName());
     set->finishInsert();
     auto future_set = std::make_shared<FutureSetFromStorage>(std::move(set));
-    auto arg = ColumnSet::create(1,future_set);
+
+    //TODO: WHY? after https://github.com/ClickHouse/ClickHouse/pull/63723 we need pass 4 instead of 1
+    auto arg = ColumnSet::create(4, future_set);
 
     ColumnsWithTypeAndName columns
         = {ColumnWithTypeAndName(std::move(column1), type0, "string0"), ColumnWithTypeAndName(std::move(arg), type_set, "__set")};
@@ -156,7 +178,7 @@ TEST(TestFunction, NotIn2)
     auto executable = function->build(block.getColumnsWithTypeAndName());
     auto result = executable->execute(block.getColumnsWithTypeAndName(), executable->getResultType(), block.rows());
 
-    auto function_not = factory.get("not", local_engine::SerializedPlanParser::global_context);
+    auto function_not = factory.get("not", local_engine::QueryContext::globalContext());
     auto type_bool = DataTypeFactory::instance().get("UInt8");
     ColumnsWithTypeAndName columns2 = {ColumnWithTypeAndName(result, type_bool, "string0")};
     Block block2(columns2);

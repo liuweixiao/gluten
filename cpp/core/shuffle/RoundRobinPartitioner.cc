@@ -22,15 +22,29 @@ namespace gluten {
 arrow::Status gluten::RoundRobinPartitioner::compute(
     const int32_t* pidArr,
     const int64_t numRows,
-    std::vector<uint16_t>& partitionId,
-    std::vector<uint32_t>& partitionIdCnt) {
-  std::fill(std::begin(partitionIdCnt), std::end(partitionIdCnt), 0);
-  partitionId.resize(numRows);
-  for (auto& pid : partitionId) {
-    pid = pidSelection_;
-    partitionIdCnt[pidSelection_]++;
-    pidSelection_ = (pidSelection_ + 1) == numPartitions_ ? 0 : (pidSelection_ + 1);
+    std::vector<uint32_t>& row2Partition) {
+  row2Partition.resize(numRows);
+  for (int32_t i = 0; i < numRows; ++i) {
+    row2Partition[i] = pidSelection_;
+    pidSelection_ = (pidSelection_ + 1) % numPartitions_;
   }
   return arrow::Status::OK();
 }
+
+arrow::Status gluten::RoundRobinPartitioner::compute(
+    const int32_t* pidArr,
+    const int64_t numRows,
+    const int32_t vectorIndex,
+    std::unordered_map<int32_t, std::vector<int64_t>>& rowVectorIndexMap) {
+  auto index = static_cast<int64_t>(vectorIndex) << 32;
+  for (int32_t i = 0; i < numRows; ++i) {
+    int64_t combined = index | (i & 0xFFFFFFFFLL);
+    auto& vec = rowVectorIndexMap[pidSelection_];
+    vec.push_back(combined);
+    pidSelection_ = (pidSelection_ + 1) % numPartitions_;
+  }
+
+  return arrow::Status::OK();
+}
+
 } // namespace gluten

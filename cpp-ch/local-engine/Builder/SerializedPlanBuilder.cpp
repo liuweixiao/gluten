@@ -1,6 +1,23 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include "SerializedPlanBuilder.h"
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeDateTime64.h>
+#include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeMap.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeTuple.h>
@@ -165,26 +182,6 @@ SerializedPlanBuilder & SerializedPlanBuilder::read(const std::string & path, Sc
     return *this;
 }
 
-SerializedPlanBuilder & SerializedPlanBuilder::readMergeTree(
-    const std::string & database,
-    const std::string & table,
-    const std::string & relative_path,
-    int min_block,
-    int max_block,
-    SchemaPtr schema)
-{
-    substrait::Rel * rel = new substrait::Rel();
-    auto * read = rel->mutable_read();
-    read->mutable_extension_table()->mutable_detail()->set_value(local_engine::MergeTreeTable{
-        .database = database, .table = table, .relative_path = relative_path, .min_block = min_block, .max_block = max_block}
-                                                                     .toString());
-    read->set_allocated_base_schema(schema);
-    setInputToPrev(rel);
-    this->prev_rel = rel;
-    return *this;
-}
-
-
 std::unique_ptr<substrait::Plan> SerializedPlanBuilder::build()
 {
     return std::move(this->plan);
@@ -195,7 +192,7 @@ SerializedPlanBuilder::SerializedPlanBuilder() : plan(std::make_unique<substrait
 }
 
 SerializedPlanBuilder &
-SerializedPlanBuilder::aggregate(std::vector<int32_t> /*keys*/, std::vector<substrait::AggregateRel_Measure *> aggregates)
+SerializedPlanBuilder::aggregate(const std::vector<int32_t> & /*keys*/, const std::vector<substrait::AggregateRel_Measure *> & aggregates)
 {
     substrait::Rel * rel = new substrait::Rel();
     auto * agg = rel->mutable_aggregate();
@@ -210,7 +207,7 @@ SerializedPlanBuilder::aggregate(std::vector<int32_t> /*keys*/, std::vector<subs
     return *this;
 }
 
-SerializedPlanBuilder & SerializedPlanBuilder::project(std::vector<substrait::Expression *> projections)
+SerializedPlanBuilder & SerializedPlanBuilder::project(const std::vector<substrait::Expression *> & projections)
 {
     substrait::Rel * project = new substrait::Rel();
     for (auto * expr : projections)
@@ -224,12 +221,15 @@ SerializedPlanBuilder & SerializedPlanBuilder::project(std::vector<substrait::Ex
 
 std::shared_ptr<substrait::Type> SerializedPlanBuilder::buildType(const DB::DataTypePtr & ch_type)
 {
-    const auto * ch_type_nullable = checkAndGetDataType<DataTypeNullable>(ch_type.get());
+    const auto ch_type_wo_lowcardinality = DB::removeLowCardinality(ch_type);
+
+    const auto * ch_type_nullable = checkAndGetDataType<DataTypeNullable>(ch_type_wo_lowcardinality.get());
+
     const bool is_nullable = (ch_type_nullable != nullptr);
     auto type_nullability
         = is_nullable ? substrait::Type_Nullability_NULLABILITY_NULLABLE : substrait::Type_Nullability_NULLABILITY_REQUIRED;
 
-    const auto ch_type_without_nullable = DB::removeNullable(ch_type);
+    const auto ch_type_without_nullable = DB::removeNullable(ch_type_wo_lowcardinality);
     const DB::WhichDataType which(ch_type_without_nullable);
 
     auto res = std::make_shared<substrait::Type>();
@@ -243,7 +243,7 @@ std::shared_ptr<substrait::Type> SerializedPlanBuilder::buildType(const DB::Data
         res->mutable_i32()->set_nullability(type_nullability);
     else if (which.isInt64())
         res->mutable_i64()->set_nullability(type_nullability);
-    else if (which.isString() || which.isAggregateFunction())
+    else if (which.isStringOrFixedString() || which.isAggregateFunction())
         res->mutable_binary()->set_nullability(type_nullability); /// Spark Binary type is more similiar to CH String type
     else if (which.isFloat32())
         res->mutable_fp32()->set_nullability(type_nullability);

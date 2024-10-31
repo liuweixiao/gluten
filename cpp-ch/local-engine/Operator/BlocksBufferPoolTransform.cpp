@@ -1,3 +1,19 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include "BlocksBufferPoolTransform.h"
 #include <QueryPipeline/Pipe.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
@@ -27,7 +43,7 @@ DB::IProcessor::Status BlocksBufferPoolTransform::prepare()
 {
     auto & output = outputs.front();
     auto & input = inputs.front();
-    if (output.isFinished())
+    if (output.isFinished() || isCancelled())
     {
         input.close();
         return Status::Finished;
@@ -68,9 +84,8 @@ void BlocksBufferPoolTransform::work()
 {
 }
 
-BlocksBufferPoolStep::BlocksBufferPoolStep(const DB::DataStream & input_stream_, size_t buffer_size_)
-    : DB::ITransformingStep(input_stream_, input_stream_.header, getTraits())
-    , header(input_stream_.header)
+BlocksBufferPoolStep::BlocksBufferPoolStep(const DB::Block & input_header, size_t buffer_size_)
+    : DB::ITransformingStep(input_header, input_header, getTraits())
     , buffer_size(buffer_size_)
 {
 }
@@ -96,9 +111,9 @@ void BlocksBufferPoolStep::describePipeline(DB::IQueryPlanStep::FormatSettings &
         DB::IQueryPlanStep::describePipeline(processors, settings);
 }
 
-void BlocksBufferPoolStep::updateOutputStream()
+void BlocksBufferPoolStep::updateOutputHeader()
 {
-    createOutputStream(input_streams.front(), input_streams.front().header, getDataStreamTraits());
+    output_header = input_headers.front();
 }
 
 }

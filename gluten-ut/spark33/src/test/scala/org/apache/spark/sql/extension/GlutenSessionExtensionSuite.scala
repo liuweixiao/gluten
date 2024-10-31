@@ -14,11 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql.extension
 
-import io.glutenproject.extension.{ColumnarOverrideRules, FallbackBroadcastExchange, JoinSelectionOverrides}
-import io.glutenproject.extension.columnar.{FallbackMultiCodegens, FallbackOneRowRelation}
+import org.apache.gluten.extension.injector.InjectorControl
+import org.apache.gluten.utils.BackendTestUtils
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql._
@@ -31,22 +30,27 @@ class GlutenSessionExtensionSuite extends GlutenSQLTestsTrait {
       .set(SPARK_SESSION_EXTENSIONS.key, classOf[MyExtensions].getCanonicalName)
   }
 
-  test("test gluten extensions") {
-    assert(spark.sessionState.queryStagePrepRules.contains(FallbackOneRowRelation(spark)))
-    assert(spark.sessionState.queryStagePrepRules.contains(FallbackMultiCodegens(spark)))
-    assert(spark.sessionState.queryStagePrepRules.contains(FallbackBroadcastExchange(spark)))
-    assert(spark.sessionState.columnarRules.contains(ColumnarOverrideRules(spark)))
-    assert(spark.sessionState.planner.strategies.contains(JoinSelectionOverrides(spark)))
+  testGluten("test gluten extensions") {
+    assert(
+      spark.sessionState.columnarRules
+        .exists(_.isInstanceOf[InjectorControl.DisablerAware]))
 
     assert(spark.sessionState.planner.strategies.contains(MySparkStrategy(spark)))
     assert(spark.sessionState.analyzer.extendedResolutionRules.contains(MyRule(spark)))
     assert(spark.sessionState.analyzer.postHocResolutionRules.contains(MyRule(spark)))
     assert(spark.sessionState.analyzer.extendedCheckRules.contains(MyCheckRule(spark)))
     assert(spark.sessionState.optimizer.batches.flatMap(_.rules).contains(MyRule(spark)))
-    assert(spark.sessionState.sqlParser.isInstanceOf[MyParser])
-    assert(spark.sessionState.functionRegistry
-      .lookupFunction(MyExtensions.myFunction._1).isDefined)
-    assert(spark.sessionState.columnarRules.contains(
-      MyColumnarRule(PreRuleReplaceAddWithBrokenVersion(), MyPostRule())))
+    if (BackendTestUtils.isCHBackendLoaded()) {
+      assert(spark.sessionState.sqlParser.isInstanceOf[InjectorControl.DisablerAware])
+    } else {
+      assert(spark.sessionState.sqlParser.isInstanceOf[MyParser])
+    }
+    assert(
+      spark.sessionState.functionRegistry
+        .lookupFunction(MyExtensions.myFunction._1)
+        .isDefined)
+    assert(
+      spark.sessionState.columnarRules.contains(
+        MyColumnarRule(PreRuleReplaceAddWithBrokenVersion(), MyPostRule())))
   }
 }

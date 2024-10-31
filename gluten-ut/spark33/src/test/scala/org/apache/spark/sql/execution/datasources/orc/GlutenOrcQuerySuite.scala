@@ -14,18 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql.execution.datasources.orc
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.{GlutenSQLTestsBaseTrait, Row}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.{GlutenSQLTestsBaseTrait, GlutenTestConstants, Row}
 
 class GlutenOrcQuerySuite extends OrcQuerySuite with GlutenSQLTestsBaseTrait {
-  test(GlutenTestConstants.GLUTEN_TEST + "Simple selection form ORC table") {
-    val data = (1 to 10).map { i =>
-      Person(s"name_$i", i, (0 to 1).map { m => Contact(s"contact_$m", s"phone_$m") })
+  testGluten("Simple selection form ORC table") {
+    val data = (1 to 10).map {
+      i => Person(s"name_$i", i, (0 to 1).map(m => Contact(s"contact_$m", s"phone_$m")))
     }
 
     withOrcTable(data, "t") {
@@ -39,8 +38,7 @@ class GlutenOrcQuerySuite extends OrcQuerySuite with GlutenSQLTestsBaseTrait {
         // leaf-0 = (LESS_THAN_EQUALS age 5)
         // expr = (not leaf-0)
         assertResult(10) {
-          sql("SELECT name, contacts FROM t where age > 5")
-            .rdd
+          sql("SELECT name, contacts FROM t where age > 5").rdd
             .flatMap(_.getAs[scala.collection.Seq[_]]("contacts"))
             .count()
         }
@@ -72,12 +70,10 @@ class GlutenOrcQuerySuite extends OrcQuerySuite with GlutenSQLTestsBaseTrait {
     }
   }
 
-  test(GlutenTestConstants.GLUTEN_TEST + "simple select queries") {
+  testGluten("simple select queries") {
     withOrcTable((0 until 10).map(i => (i, i.toString)), "t") {
       withSQLConf("spark.sql.orc.enableVectorizedReader" -> "false") {
-        checkAnswer(
-          sql("SELECT `_1` FROM t where t.`_1` > 5"),
-          (6 until 10).map(Row.apply(_)))
+        checkAnswer(sql("SELECT `_1` FROM t where t.`_1` > 5"), (6 until 10).map(Row.apply(_)))
 
         checkAnswer(
           sql("SELECT `_1` FROM t as tmp where tmp.`_1` < 5"),
@@ -86,7 +82,7 @@ class GlutenOrcQuerySuite extends OrcQuerySuite with GlutenSQLTestsBaseTrait {
     }
   }
 
-  test(GlutenTestConstants.GLUTEN_TEST + "overwriting") {
+  testGluten("overwriting") {
     val data = (0 until 10).map(i => (i, i.toString))
     spark.createDataFrame(data).toDF("c1", "c2").createOrReplaceTempView("tmp")
     withOrcTable(data, "t") {
@@ -101,11 +97,12 @@ class GlutenOrcQuerySuite extends OrcQuerySuite with GlutenSQLTestsBaseTrait {
       purge = false)
   }
 
-  test(GlutenTestConstants.GLUTEN_TEST + "self-join") {
+  testGluten("self-join") {
     // 4 rows, cells of column 1 of row 2 and row 4 are null
-    val data = (1 to 4).map { i =>
-      val maybeInt = if (i % 2 == 0) None else Some(i)
-      (maybeInt, i.toString)
+    val data = (1 to 4).map {
+      i =>
+        val maybeInt = if (i % 2 == 0) None else Some(i)
+        (maybeInt, i.toString)
     }
 
     withOrcTable(data, "t") {
@@ -123,8 +120,7 @@ class GlutenOrcQuerySuite extends OrcQuerySuite with GlutenSQLTestsBaseTrait {
     }
   }
 
-  test(GlutenTestConstants.GLUTEN_TEST +
-    "columns only referenced by pushed down filters should remain") {
+  testGluten("columns only referenced by pushed down filters should remain") {
     withOrcTable((1 to 10).map(Tuple1.apply), "t") {
       withSQLConf("spark.sql.orc.enableVectorizedReader" -> "false") {
         checkAnswer(sql("SELECT `_1` FROM t WHERE `_1` < 10"), (1 to 9).map(Row.apply(_)))
@@ -132,8 +128,7 @@ class GlutenOrcQuerySuite extends OrcQuerySuite with GlutenSQLTestsBaseTrait {
     }
   }
 
-  test(GlutenTestConstants.GLUTEN_TEST +
-    "SPARK-5309 strings stored using dictionary compression in orc") {
+  testGluten("SPARK-5309 strings stored using dictionary compression in orc") {
     withOrcTable((0 until 1000).map(i => ("same", "run_" + i / 100, 1)), "t") {
       withSQLConf("spark.sql.orc.enableVectorizedReader" -> "false") {
         checkAnswer(
@@ -150,14 +145,12 @@ class GlutenOrcQuerySuite extends OrcQuerySuite with GlutenSQLTestsBaseTrait {
 
 class GlutenOrcV1QuerySuite extends GlutenOrcQuerySuite {
   override def sparkConf: SparkConf =
-    super
-      .sparkConf
+    super.sparkConf
       .set(SQLConf.USE_V1_SOURCE_LIST, "orc")
 }
 
 class GlutenOrcV2QuerySuite extends GlutenOrcQuerySuite {
   override def sparkConf: SparkConf =
-    super
-      .sparkConf
+    super.sparkConf
       .set(SQLConf.USE_V1_SOURCE_LIST, "")
 }

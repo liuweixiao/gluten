@@ -14,22 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql.execution.ui
 
-import io.glutenproject.events.GlutenEvent
+import org.apache.gluten.events.GlutenEvent
+
 import org.apache.spark.SparkContext
 import org.apache.spark.status.ElementTrackingStore
 
 object GlutenEventUtils {
   def post(sc: SparkContext, event: GlutenEvent): Unit = {
     sc.listenerBus.post(event)
-  }
-
-  def registerListener(sc: SparkContext): Unit = {
-    val kvStore = sc.statusStore.store.asInstanceOf[ElementTrackingStore]
-    val listener = new GlutenSQLAppStatusListener(sc.conf, kvStore)
-    sc.listenerBus.addToStatusQueue(listener)
   }
 
   def attachUI(sc: SparkContext): Unit = {

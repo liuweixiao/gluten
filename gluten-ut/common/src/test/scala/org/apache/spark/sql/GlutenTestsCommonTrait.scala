@@ -14,19 +14,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql
 
-import io.glutenproject.test.TestStats
+import org.apache.gluten.test.TestStats
 
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.sql.catalyst.expressions._
 
-import org.scalactic.source.Position
-import org.scalatest.{Args, Status, Tag}
+import org.scalatest.{Args, Status}
 
 trait GlutenTestsCommonTrait
-  extends SparkFunSuite with ExpressionEvalHelper with GlutenTestsBaseTrait {
+  extends SparkFunSuite
+  with ExpressionEvalHelper
+  with GlutenTestsBaseTrait {
 
   override def runTest(testName: String, args: Args): Status = {
     TestStats.suiteTestNumber += 1
@@ -45,12 +45,5 @@ trait GlutenTestsCommonTrait
 
     TestStats.endCase(status.succeeds());
     status
-  }
-
-  override protected def test(testName: String,
-                              testTags: Tag*)(testFun: => Any)(implicit pos: Position): Unit = {
-    if (shouldRun(testName)) {
-      super.test(testName, testTags: _*)(testFun)
-    }
   }
 }

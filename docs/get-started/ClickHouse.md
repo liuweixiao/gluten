@@ -27,49 +27,99 @@ The architecture of the ClickHouse backend is shown below:
 
 In general, we use IDEA for Gluten development and CLion for ClickHouse backend development on **Ubuntu 20**.
 
-#### Prerequisites
+#### Prerequisite
 
-Install the software required for compilation, run `sudo ./ep/build-clickhouse/src/install_ubuntu.sh`.
-Under the hood, it will install the following software:
-- Clang 16.0
+##### For compiling clickhouse backend
+
+Following softwares are required,
+- Clang 18.0
 - cmake 3.20 or higher version
 - ninja-build 1.8.2
 
+You can run `sudo $gluten_root/ep/build-clickhouse/src/install_ubuntu.sh` to setup the requirements. We also provide a [docker file](../../cpp-ch/local-engine/docker/image/Dockerfile), you can build your own image
+```shell
+cd $gluten_root/cpp-ch/local-engine/docker/image/
+docker build . -t libch_builder
+```
+
 You can also refer to [How-to-Build-ClickHouse-on-Linux](https://clickhouse.com/docs/en/development/build/).
+
+##### For compiling gluten
 You need to install the following software manually:
 - Java 8
 - Maven 3.6.3 or higher version
 - Spark 3.2.2 or Spark 3.3.1
 
 Then, get Gluten code:
-```
-    git clone https://github.com/oap-project/gluten.git
+```shell
+git clone https://github.com/apache/incubator-gluten.git
 ```
 
 #### Setup ClickHouse backend development environment
 
-If you don't care about development environment, you can skip this part.
+##### Compile Clickhouse backend
 
-Otherwise, do:
+###### clone repos
+clone gluten repo
 
-1. clone Kyligence/ClickHouse repo
-    ```
-    cd /to/some/place/
-    git clone --recursive --shallow-submodules -b clickhouse_backend https://github.com/Kyligence/ClickHouse.git
-    ```
 
-2. Configure cpp-ch
-    ${GLUTEN_SOURCE}/cpp-ch can be treated as an add-on of Kyligence/Clickhouse
+```shell
+git clone https://github.com/apache/incubator-gluten.git
+```
 
-    First, initialize some configuration for this add-on:
+clone Kyligence/ClickHouse repo
 
-    ```shell
-    export GLUTEN_SOURCE=/path/to/gluten
-    export CH_SOURCE_DIR=/path/to/ClickHouse
-    cmake -G Ninja -S ${GLUTEN_SOURCE}/cpp-ch -B ${GLUTEN_SOURCE}/cpp-ch/build_ch -DCH_SOURCE_DIR=${CH_SOURCE_DIR} "-DCMAKE_C_COMPILER=$(command -v clang-16)" "-DCMAKE_CXX_COMPILER=$(command -v clang++-16)" "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
-    ```
+```shell
+git clone --recursive --shallow-submodules -b clickhouse_backend https://github.com/Kyligence/ClickHouse.git
+```
 
-    Next, you need to compile Kyligence/Clickhouse. There are two options:
+checkout to the latest branch
+
+```shell
+latest_branch=$(cat $gluten_root/cpp-ch/clickhouse.version  | grep CH_BRANCH | cut -d= -f2)
+git fetch origin $latest_branch
+git checkout -b $latest_branch origin/$latest_branch
+git submodule sync --recursive
+git submodule update --init --recursive
+```
+
+
+
+
+##### build
+
+There are several ways to build the backend library.
+1. Build it direclty
+
+
+If you have setup all requirements, you can use following command to build it direclty.
+
+```bash
+cd $gluten_root
+bash ./ep/build-clickhouse/src/build_clickhouse.sh
+```
+
+
+This will download Clickhouse for you and build everything.
+The target file is `$gluten_root/cpp-ch/build/utils/extern-local-engine/libch.so`.
+
+
+2. Use docker
+
+
+You can use [docker file](../../cpp-ch/local-engine/docker/image/Dockerfile) to build a docker image
+```shell
+cd $gluten_root/cpp-ch/local-engine/docker/image/
+docker build . -t libch_builder
+
+cd $gluten_root/cpp-ch/local-engine/docker
+./build.sh -g <gluten_root> -c <clickhouse_root> [-b <build_directory>] [-o <output_directory>] libch_builder
+```
+`build_directory` is a directory used as to store the intermediate files from compiling. It will use `current_dir>`/build as the default value if you don't provide it.
+
+
+`output_directory` is used as to store the finaly output `libch.so`. The default value is `current_dir`/output if you don't provide it.
+
 
 3. (Option 1) Use CLion
 
@@ -94,36 +144,40 @@ Otherwise, do:
    
       If it builds with Debug mode successfully, there is a library file called 'libchd.so' in path '${CH_SOURCE_DIR}/cmake-build-debug/utils/extern-local-engine/'.
 
-4. (Option 2) Use command line
-    ```
-    cmake --build ${GLUTEN_SOURCE}/cpp-ch/build_ch --target build_ch
-   ```
-   If it builds successfully, there is a library file called 'libch.so' in path '${GLUTEN_SOURCE}/cpp-ch/build/utils/extern-local-engine/'.
-   
-### Directly Compile ClickHouse backend
+4. Build it as a submodule of Clickhouse
 
-In case you don't want a develop environment, you can use the following command to compile ClickHouse backend directly:
 
+```shell
+ln -s $gluten_root/cpp-ch/local-engine $clickhouse_root/utils/extern-local-engine
+mkdir -p $clickhouse_root/build
+cd $clickhouse_root/build
+cmake -G Ninja  "-DCMAKE_C_COMPILER=$CC" "-DCMAKE_CXX_COMPILER=$CXX" \
+          "-DCMAKE_BUILD_TYPE=Release" \
+          "-DENABLE_PROTOBUF=1" \
+          "-DENABLE_EMBEDDED_COMPILER=$ENABLE_EMBEDDED_COMPILER" \
+          "-DENABLE_TESTS=OFF" \
+          "-DWERROR=OFF" \
+          "-DENABLE_JEMALLOC=1" \
+          "-DENABLE_MULTITARGET_CODE=ON" \
+          "-DENABLE_GWP_ASAN=OFF" \
+          "-DENABLE_EXTERN_LOCAL_ENGINE=ON" \
+          "-DENABLE_THINLTO=false" \
+          ..
+ninja
 ```
-git clone https://github.com/oap-project/gluten.git
-cd gluten
-bash ./ep/build-clickhouse/src/build_clickhouse.sh
-```
-
-This will download Clickhouse for you and build everything.
-The target file is `/path/to/gluten/cpp-ch/build/utils/extern-local-engine/libch.so`.
+The result is in `$clickhouse_root/build/utils/extern-local-engine/libch.so`.
 
 
 
-### Compile Gluten
+#### Compile Gluten
 
 The prerequisites are the same as the one mentioned above. Compile Gluten with ClickHouse backend through maven:
 
 - for Spark 3.2.2<span id="deploy-spark-322"></span>
 
 ```
-    git clone https://github.com/oap-project/gluten.git
-    cd gluten/
+    git clone https://github.com/apache/incubator-gluten.git
+    cd incubator-gluten/
     export MAVEN_OPTS="-Xmx8g -XX:ReservedCodeCacheSize=2g"
     mvn clean install -Pbackends-clickhouse -Phadoop-2.7.4 -Pspark-3.2 -Dhadoop.version=2.8.5 -DskipTests -Dcheckstyle.skip
     ls -al backends-clickhouse/target/gluten-XXXXX-spark-3.2-jar-with-dependencies.jar
@@ -132,8 +186,8 @@ The prerequisites are the same as the one mentioned above. Compile Gluten with C
 - for Spark 3.3.1
 
 ```
-    git clone https://github.com/oap-project/gluten.git
-    cd gluten/
+    git clone https://github.com/apache/incubator-gluten.git
+    cd incubator-gluten/
     export MAVEN_OPTS="-Xmx8g -XX:ReservedCodeCacheSize=2g"
     mvn clean install -Pbackends-clickhouse -Phadoop-2.7.4 -Pspark-3.3 -Dhadoop.version=2.8.5 -DskipTests -Dcheckstyle.skip
     ls -al backends-clickhouse/target/gluten-XXXXX-spark-3.3-jar-with-dependencies.jar
@@ -148,12 +202,9 @@ The prerequisites are the same as the one mentioned above. Compile Gluten with C
 ```
 tar zxf spark-3.2.2-bin-hadoop2.7.tgz
 cd spark-3.2.2-bin-hadoop2.7
-rm -f jars/protobuf-java-2.5.0.jar
-#download protobuf-java-3.16.3.jar, delta-core_2.12-2.0.1.jar and delta-storage-2.0.1.jar
-wget https://repo1.maven.org/maven2/com/google/protobuf/protobuf-java/3.16.3/protobuf-java-3.16.3.jar -P ./jars
+#download delta-core_2.12-2.0.1.jar and delta-storage-2.0.1.jar
 wget https://repo1.maven.org/maven2/io/delta/delta-core_2.12/2.0.1/delta-core_2.12-2.0.1.jar -P ./jars
 wget https://repo1.maven.org/maven2/io/delta/delta-storage/2.0.1/delta-storage-2.0.1.jar -P ./jars
-wget https://repo1.maven.org/maven2/io/starburst/openx/data/json-serde/1.3.9-e.10/json-serde-1.3.9-e.10-jar-with-dependencies.jar ./jars
 cp gluten-XXXXX-spark-3.2-jar-with-dependencies.jar jars/
 ```
 
@@ -162,12 +213,9 @@ cp gluten-XXXXX-spark-3.2-jar-with-dependencies.jar jars/
 ```
 tar zxf spark-3.3.1-bin-hadoop2.7.tgz
 cd spark-3.3.1-bin-hadoop2.7
-rm -f jars/protobuf-java-2.5.0.jar
-#download protobuf-java-3.16.3.jar, delta-core_2.12-2.2.0.jar and delta-storage-2.2.0.jar
-wget https://repo1.maven.org/maven2/com/google/protobuf/protobuf-java/3.16.3/protobuf-java-3.16.3.jar -P ./jars
+#download delta-core_2.12-2.2.0.jar and delta-storage-2.2.0.jar
 wget https://repo1.maven.org/maven2/io/delta/delta-core_2.12/2.2.0/delta-core_2.12-2.2.0.jar -P ./jars
 wget https://repo1.maven.org/maven2/io/delta/delta-storage/2.2.0/delta-storage-2.2.0.jar -P ./jars
-wget https://repo1.maven.org/maven2/io/starburst/openx/data/json-serde/1.3.9-e.10/json-serde-1.3.9-e.10-jar-with-dependencies.jar ./jars
 cp gluten-XXXXX-spark-3.3-jar-with-dependencies.jar jars/
 ```
 
@@ -192,7 +240,7 @@ cd spark-3.2.2-bin-hadoop2.7
   --conf spark.sql.columnVector.offheap.enabled=true \
   --conf spark.memory.offHeap.enabled=true \
   --conf spark.memory.offHeap.size=6442450944 \
-  --conf spark.plugins=io.glutenproject.GlutenPlugin \
+  --conf spark.plugins=org.apache.gluten.GlutenPlugin \
   --conf spark.gluten.sql.columnar.columnarToRow=true \
   --conf spark.executorEnv.LD_PRELOAD=/path_to_clickhouse_library/libch.so\
   --conf spark.gluten.sql.columnar.libpath=/path_to_clickhouse_library/libch.so \
@@ -201,7 +249,6 @@ cd spark-3.2.2-bin-hadoop2.7
   --conf spark.gluten.sql.columnar.hashagg.enablefinal=true \
   --conf spark.gluten.sql.enable.native.validation=false \
   --conf spark.io.compression.codec=snappy \
-  --conf spark.gluten.sql.columnar.backend.ch.use.v2=false \
   --conf spark.gluten.sql.columnar.forceShuffledHashJoin=true \
   --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.execution.datasources.v2.clickhouse.ClickHouseSparkCatalog \
   --conf spark.databricks.delta.maxSnapshotLineageLength=20 \
@@ -374,7 +421,7 @@ cd spark-3.2.2-bin-hadoop2.7
   --conf spark.sql.columnVector.offheap.enabled=true \
   --conf spark.memory.offHeap.enabled=true \
   --conf spark.memory.offHeap.size=6442450944 \
-  --conf spark.plugins=io.glutenproject.GlutenPlugin \
+  --conf spark.plugins=org.apache.gluten.GlutenPlugin \
   --conf spark.gluten.sql.columnar.columnarToRow=true \
   --conf spark.executorEnv.LD_PRELOAD=/path_to_clickhouse_library/libch.so\
   --conf spark.gluten.sql.columnar.libpath=/path_to_clickhouse_library/libch.so \
@@ -383,7 +430,6 @@ cd spark-3.2.2-bin-hadoop2.7
   --conf spark.gluten.sql.columnar.hashagg.enablefinal=true \
   --conf spark.gluten.sql.enable.native.validation=false \
   --conf spark.io.compression.codec=snappy \
-  --conf spark.gluten.sql.columnar.backend.ch.use.v2=false \
   --conf spark.gluten.sql.columnar.forceShuffledHashJoin=true \
   --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.execution.datasources.v2.clickhouse.ClickHouseSparkCatalog \
   --conf spark.databricks.delta.maxSnapshotLineageLength=20 \
@@ -455,10 +501,10 @@ $spark_cmd \
   --conf spark.gluten.sql.columnar.loadarrow=false \
   --conf spark.gluten.sql.columnar.hashagg.enablefinal=true \
   --conf spark.gluten.sql.enable.native.validation=false \
-  --conf spark.gluten.sql.columnar.forceshuffledhashjoin=true \
+  --conf spark.gluten.sql.columnar.forceShuffledHashJoin=true \
   --conf spark.gluten.sql.columnar.backend.ch.runtime_config.hdfs.libhdfs3_conf=$hdfs_conf \
   --conf spark.gluten.sql.columnar.backend.ch.runtime_config.logger.level=debug \
-  --conf spark.plugins=io.glutenproject.GlutenPlugin \
+  --conf spark.plugins=org.apache.gluten.GlutenPlugin \
   --conf spark.executorEnv.LD_PRELOAD=$LD_PRELOAD \
   --conf spark.hadoop.input.connect.timeout=600000 \
   --conf spark.hadoop.input.read.timeout=600000 \
@@ -493,11 +539,11 @@ This benchmark is tested on AWS EC2 cluster, there are 7 EC2 instances:
 
   Refer to [Deploy Spark 3.2.2](#deploy-spark-322)
 
-- Deploy gluten-core-XXXXX-jar-with-dependencies.jar
+- Deploy gluten-substrait-XXXXX-jar-with-dependencies.jar
 
 ```
-    #deploy 'gluten-core-XXXXX-jar-with-dependencies.jar' to every node, and then
-    cp gluten-core-XXXXX-jar-with-dependencies.jar /path_to_spark/jars/
+    #deploy 'gluten-substrait-XXXXX-jar-with-dependencies.jar' to every node, and then
+    cp gluten-substrait-XXXXX-jar-with-dependencies.jar /path_to_spark/jars/
 ```
 
 - Deploy ClickHouse library
@@ -567,7 +613,7 @@ cd spark-3.2.2-bin-hadoop2.7
   --conf spark.memory.offHeap.size=42949672960 \
   --conf spark.serializer=org.apache.spark.serializer.JavaSerializer \
   --conf spark.sql.sources.ignoreDataLocality=true \
-  --conf spark.plugins=io.glutenproject.GlutenPlugin \
+  --conf spark.plugins=org.apache.gluten.GlutenPlugin \
   --conf spark.gluten.sql.columnar.columnarToRow=true \
   --conf spark.gluten.sql.columnar.libpath=/path_to_clickhouse_library/libch.so \
   --conf spark.gluten.sql.columnar.iterator=true \
@@ -575,7 +621,6 @@ cd spark-3.2.2-bin-hadoop2.7
   --conf spark.gluten.sql.columnar.hashagg.enablefinal=true \
   --conf spark.gluten.sql.enable.native.validation=false \
   --conf spark.io.compression.codec=snappy \
-  --conf spark.gluten.sql.columnar.backend.ch.use.v2=false \
   --conf spark.gluten.sql.columnar.forceShuffledHashJoin=true \
   --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.execution.datasources.v2.clickhouse.ClickHouseSparkCatalog \
   --conf spark.databricks.delta.maxSnapshotLineageLength=20 \
@@ -631,3 +676,55 @@ The performance of Gluten + ClickHouse backend increases by **about 1/3**.
 
 https://opencicd.kyligence.com/job/Gluten/job/gluten-ci/
 public read-only account：gluten/hN2xX3uQ4m
+
+### Celeborn support
+
+Gluten with clickhouse backend supports [Celeborn](https://github.com/apache/celeborn) as remote shuffle service. Currently, the supported Celeborn versions are `0.3.x`, `0.4.x` and `0.5.x`.
+
+Below introduction is used to enable this feature.
+
+First refer to this URL(https://github.com/apache/celeborn) to setup a celeborn cluster.
+
+When compiling the Gluten Java module, it's required to enable `celeborn` profile, as follows:
+
+```
+mvn clean package -Pbackends-clickhouse -Pspark-3.3 -Pceleborn -DskipTests
+```
+
+Then add the Spark Celeborn Client packages to your Spark application's classpath(usually add them into `$SPARK_HOME/jars`).
+
+- Celeborn: celeborn-client-spark-3-shaded_2.12-[celebornVersion].jar
+
+Currently to use Gluten following configurations are required in `spark-defaults.conf`
+
+```
+spark.shuffle.manager org.apache.spark.shuffle.gluten.celeborn.CelebornShuffleManager
+
+# celeborn master
+spark.celeborn.master.endpoints clb-master:9097
+
+spark.shuffle.service.enabled false
+
+# options: hash, sort
+# Hash shuffle writer use (partition count) * (celeborn.push.buffer.max.size) * (spark.executor.cores) memory.
+# Sort shuffle writer uses less memory than hash shuffle writer, if your shuffle partition count is large, try to use sort hash writer.
+spark.celeborn.client.spark.shuffle.writer hash
+
+# We recommend setting spark.celeborn.client.push.replicate.enabled to true to enable server-side data replication
+# If you have only one worker, this setting must be false 
+# If your Celeborn is using HDFS, it's recommended to set this setting to false
+spark.celeborn.client.push.replicate.enabled true
+
+# Support for Spark AQE only tested under Spark 3
+# we recommend setting localShuffleReader to false to get better performance of Celeborn
+spark.sql.adaptive.localShuffleReader.enabled false
+
+# If Celeborn is using HDFS
+spark.celeborn.storage.hdfs.dir hdfs://<namenode>/celeborn
+
+# If you want to use dynamic resource allocation,
+# please refer to this URL (https://github.com/apache/celeborn/tree/main/assets/spark-patch) to apply the patch into your own Spark.
+spark.dynamicAllocation.enabled false
+```
+
+

@@ -14,13 +14,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.util
 
+import org.apache.spark.SparkConf
+import org.apache.spark.internal.Logging
+
+import _root_.org.apache.gluten.exception.GlutenException
 import org.apache.commons.io.FileUtils
 import org.apache.commons.lang3.StringUtils
-import org.apache.spark.SparkEnv
-import org.apache.spark.internal.Logging
 
 import java.io.{File, IOException}
 import java.nio.file.Paths
@@ -29,25 +30,26 @@ import java.nio.file.Paths
  * Manages Gluten's local directories, for storing jars, libs, spill files, or other temporary
  * stuffs.
  */
-object SparkDirectoryUtil extends Logging {
-  private val ROOTS = Utils.getConfiguredLocalDirs(SparkEnv.get.conf).flatMap { rootDir =>
-    try {
-      val localDir = Utils.createDirectory(rootDir, "gluten")
-      GlutenShutdownManager.addHookForTempDirRemoval(() => {
-        try FileUtils.forceDelete(localDir)
-        catch {
-          case e: Exception =>
-            throw new RuntimeException(e)
-        }
-      })
-      logInfo(s"Created local directory at $localDir")
-      Some(localDir)
-    } catch {
-      case e: IOException =>
-        logError(
-          s"Failed to create Gluten local dir in $rootDir. Ignoring this directory.", e)
-        None
-    }
+class SparkDirectoryUtil private (val roots: Array[String]) extends Logging {
+  private val ROOTS: Array[File] = roots.flatMap {
+    rootDir =>
+      try {
+        val localDir = Utils.createDirectory(rootDir, "gluten")
+        SparkShutdownManagerUtil.addHookForTempDirRemoval(
+          () => {
+            try FileUtils.forceDelete(localDir)
+            catch {
+              case e: Exception =>
+                throw new GlutenException(e)
+            }
+          })
+        logInfo(s"Created local directory at $localDir")
+        Some(localDir)
+      } catch {
+        case e: IOException =>
+          logError(s"Failed to create Gluten local dir in $rootDir. Ignoring this directory.", e)
+          None
+      }
   }
 
   private val NAMESPACE_MAPPING: java.util.Map[String, Namespace] = new java.util.HashMap()
@@ -63,11 +65,40 @@ object SparkDirectoryUtil extends Logging {
   }
 }
 
+object SparkDirectoryUtil extends Logging {
+  private var INSTANCE: SparkDirectoryUtil = _
+
+  def init(conf: SparkConf): Unit = synchronized {
+    val roots = Utils.getConfiguredLocalDirs(conf)
+    init(roots)
+  }
+
+  private def init(roots: Array[String]): Unit = synchronized {
+    if (INSTANCE == null) {
+      INSTANCE = new SparkDirectoryUtil(roots)
+      return
+    }
+    if (INSTANCE.roots.toSet != roots.toSet) {
+      throw new IllegalArgumentException(
+        s"Reinitialize SparkDirectoryUtil with different root dirs: old: ${INSTANCE.ROOTS
+            .mkString("Array(", ", ", ")")}, new: ${roots.mkString("Array(", ", ", ")")}"
+      )
+    }
+  }
+
+  def get(): SparkDirectoryUtil = synchronized {
+    assert(INSTANCE != null, "Default instance of SparkDirectoryUtil was not set yet")
+    INSTANCE
+  }
+}
+
 class Namespace(private val parents: Array[File], private val name: String) {
-  private val all = parents.map { root =>
-    val path = Paths.get(root.getAbsolutePath)
-      .resolve(name)
-    path.toFile
+  val all = parents.map {
+    root =>
+      val path = Paths
+        .get(root.getAbsolutePath)
+        .resolve(name)
+      path.toFile
   }
 
   private val cycleLooper = Stream.continually(all).flatten.toIterator
@@ -80,7 +111,8 @@ class Namespace(private val parents: Array[File], private val name: String) {
     if (StringUtils.isEmpty(subDir.getAbsolutePath)) {
       throw new IllegalArgumentException(s"Illegal local dir: $subDir")
     }
-    val path = Paths.get(subDir.getAbsolutePath)
+    val path = Paths
+      .get(subDir.getAbsolutePath)
       .resolve(childDirName)
     val file = path.toFile
     FileUtils.forceMkdir(file)
@@ -89,7 +121,8 @@ class Namespace(private val parents: Array[File], private val name: String) {
 
   def mkChildDirRandomly(childDirName: String): File = {
     val selected = all(scala.util.Random.nextInt(all.length))
-    val path = Paths.get(selected.getAbsolutePath)
+    val path = Paths
+      .get(selected.getAbsolutePath)
       .resolve(childDirName)
     val file = path.toFile
     FileUtils.forceMkdir(file)
@@ -97,12 +130,14 @@ class Namespace(private val parents: Array[File], private val name: String) {
   }
 
   def mkChildDirs(childDirName: String): Array[File] = {
-    all.map { subDir =>
-      val path = Paths.get(subDir.getAbsolutePath)
-        .resolve(childDirName)
-      val file = path.toFile
-      FileUtils.forceMkdir(file)
-      file
+    all.map {
+      subDir =>
+        val path = Paths
+          .get(subDir.getAbsolutePath)
+          .resolve(childDirName)
+        val file = path.toFile
+        FileUtils.forceMkdir(file)
+        file
     }
   }
 }

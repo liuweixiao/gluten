@@ -1,3 +1,19 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include <string>
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionsStringSearch.h>
@@ -35,7 +51,8 @@ struct PositionSparkImpl
         const std::string & needle,
         const ColumnPtr & start_pos,
         PaddedPODArray<UInt64> & res,
-        [[maybe_unused]] ColumnUInt8 * res_null)
+        [[maybe_unused]] ColumnUInt8 * res_null,
+        [[maybe_unused]] size_t input_rows_count)
     {
         /// `res_null` serves as an output parameter for implementing an XYZOrNull variant.
         assert(!res_null);
@@ -88,7 +105,7 @@ struct PositionSparkImpl
     }
 
     /// Search for substring in string.
-    static void constantConstantScalar(std::string data, std::string needle, UInt64 start_pos, UInt64 & res)
+    static void constantConstantScalar(std::string data, const std::string & needle, UInt64 start_pos, UInt64 & res)
     {
         size_t start_byte = Impl::advancePos(data.data(), data.data() + data.size(), start_pos - 1) - data.data();
         res = data.find(needle, start_byte);
@@ -147,7 +164,8 @@ struct PositionSparkImpl
         const ColumnString::Offsets & needle_offsets,
         const ColumnPtr & start_pos,
         PaddedPODArray<UInt64> & res,
-        [[maybe_unused]] ColumnUInt8 * res_null)
+        [[maybe_unused]] ColumnUInt8 * res_null,
+        size_t input_rows_count)
     {
         /// `res_null` serves as an output parameter for implementing an XYZOrNull variant.
         assert(!res_null);
@@ -155,9 +173,8 @@ struct PositionSparkImpl
         ColumnString::Offset prev_haystack_offset = 0;
         ColumnString::Offset prev_needle_offset = 0;
 
-        size_t size = haystack_offsets.size();
 
-        for (size_t i = 0; i < size; ++i)
+        for (size_t i = 0; i < input_rows_count; ++i)
         {
             size_t needle_size = needle_offsets[i] - prev_needle_offset - 1;
             size_t haystack_size = haystack_offsets[i] - prev_haystack_offset - 1;
@@ -211,7 +228,8 @@ struct PositionSparkImpl
         const ColumnString::Offsets & needle_offsets,
         const ColumnPtr & start_pos,
         PaddedPODArray<UInt64> & res,
-        [[maybe_unused]] ColumnUInt8 * res_null)
+        [[maybe_unused]] ColumnUInt8 * res_null,
+        size_t input_rows_count)
     {
         /// `res_null` serves as an output parameter for implementing an XYZOrNull variant.
         assert(!res_null);
@@ -219,9 +237,7 @@ struct PositionSparkImpl
         /// NOTE You could use haystack indexing. But this is a rare case.
         ColumnString::Offset prev_needle_offset = 0;
 
-        size_t size = needle_offsets.size();
-
-        for (size_t i = 0; i < size; ++i)
+        for (size_t i = 0; i < input_rows_count; ++i)
         {
             size_t needle_size = needle_offsets[i] - prev_needle_offset - 1;
 

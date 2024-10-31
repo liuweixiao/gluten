@@ -16,13 +16,11 @@
  */
 package org.apache.spark.sql.execution.benchmarks
 
-import io.glutenproject.GlutenConfig
-import io.glutenproject.execution.{FileSourceScanExecTransformer, ProjectExecTransformer, WholeStageTransformer}
-import io.glutenproject.sql.shims.SparkShimLoader
-import io.glutenproject.utils.UTSystemParameters
-import io.glutenproject.vectorized.JniLibLoader
+import org.apache.gluten.GlutenConfig
+import org.apache.gluten.execution.{FileSourceScanExecTransformer, ProjectExecTransformer, WholeStageTransformer}
+import org.apache.gluten.sql.shims.SparkShimLoader
 
-import org.apache.spark.{SparkConf, SparkEnv}
+import org.apache.spark.SparkEnv
 import org.apache.spark.benchmark.Benchmark
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
@@ -31,7 +29,6 @@ import org.apache.spark.sql.execution.{ColumnarCollapseTransformStages, Columnar
 import org.apache.spark.sql.execution.benchmark.SqlBasedBenchmark
 import org.apache.spark.sql.execution.benchmarks.utils.FakeFileOutputStream
 import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
-import org.apache.spark.sql.execution.datasources.v2.clickhouse.ClickHouseLog
 import org.apache.spark.sql.execution.exchange.{ENSURE_REQUIREMENTS, ShuffleExchangeExec}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.ShuffleBlockId
@@ -57,8 +54,9 @@ import org.apache.spark.storage.ShuffleBlockId
  *     8. filter conditions (Optional);
  * }}}
  */
-object CHAggAndShuffleBenchmark extends SqlBasedBenchmark {
+object CHAggAndShuffleBenchmark extends SqlBasedBenchmark with CHSqlBasedBenchmark {
 
+  protected lazy val appName = "CHAggAndShuffleBenchmark"
   protected lazy val thrdNum = "3"
   protected lazy val shufflePartition = "12"
   protected lazy val memorySize = "15G"
@@ -67,31 +65,10 @@ object CHAggAndShuffleBenchmark extends SqlBasedBenchmark {
   def beforeAll(): Unit = {}
 
   override def getSparkSession: SparkSession = {
-    beforeAll();
-    val conf = new SparkConf()
-      .setAppName("CHAggAndShuffleBenchmark")
-      .setIfMissing("spark.master", s"local[$thrdNum]")
-      .set("spark.plugins", "io.glutenproject.GlutenPlugin")
-      .set(
-        "spark.sql.catalog.spark_catalog",
-        "org.apache.spark.sql.execution.datasources.v2.clickhouse.ClickHouseSparkCatalog")
-      .set("spark.memory.offHeap.enabled", "true")
-      .set("spark.databricks.delta.maxSnapshotLineageLength", "20")
-      .set("spark.databricks.delta.snapshotPartitions", "1")
-      .set("spark.databricks.delta.properties.defaults.checkpointInterval", "5")
-      .set("spark.databricks.delta.stalenessLimit", "3600000")
-      .set("spark.gluten.sql.columnar.columnarToRow", "true")
-      .set("spark.gluten.sql.enable.native.validation", "false")
+    beforeAll()
+    val conf = getSparkConf
       .set("spark.gluten.sql.columnar.separate.scan.rdd.for.ch", "false")
-      .set("spark.sql.adaptive.enabled", "false")
-      .setIfMissing(GlutenConfig.GLUTEN_LIB_PATH, UTSystemParameters.getClickHouseLibPath())
-      .setIfMissing("spark.memory.offHeap.size", offheapSize)
-      .setIfMissing("spark.sql.columnVector.offheap.enabled", "true")
       .setIfMissing("spark.sql.shuffle.partitions", shufflePartition)
-      .setIfMissing("spark.driver.memory", memorySize)
-      .setIfMissing("spark.executor.memory", memorySize)
-      .setIfMissing("spark.sql.files.maxPartitionBytes", "1G")
-      .setIfMissing("spark.sql.files.openCostInBytes", "1073741824")
       .setIfMissing("spark.shuffle.manager", "sort")
       .setIfMissing("spark.io.compression.codec", "SNAPPY")
 
@@ -251,17 +228,18 @@ object CHAggAndShuffleBenchmark extends SqlBasedBenchmark {
     }
 
     // Get all `ColumnarShuffleExchangeExec` and run the second one.
-    val shuffleStage = executedPlan.collect {
+    val shuffleExchange = executedPlan.collect {
       case shuffle: ColumnarShuffleExchangeExec => shuffle
     }(1)
 
     chAllStagesBenchmark.addCase(s"Shuffle Split Stage", executedCnt) {
       _ =>
         val shuffleSplit = ColumnarShuffleExchangeExec(
-          shuffleStage.outputPartitioning,
-          shuffleStage.child,
+          shuffleExchange.outputPartitioning,
+          shuffleExchange.child,
           ENSURE_REQUIREMENTS,
-          shuffleStage.child.output)
+          shuffleExchange.child.output,
+          shuffleExchange.advisoryPartitionSize)
         val resultRDD = shuffleSplit.columnarShuffleDependency.rdd.mapPartitionsInternal {
           batches =>
             batches.foreach(batch => (batch._1, batch._2.numRows().toLong))
@@ -273,10 +251,11 @@ object CHAggAndShuffleBenchmark extends SqlBasedBenchmark {
     chAllStagesBenchmark.addCase(s"Shuffle Write Stage ( Fake output to file )", executedCnt) {
       _ =>
         val shuffleWrite = ColumnarShuffleExchangeExec(
-          shuffleStage.outputPartitioning,
-          shuffleStage.child,
+          shuffleExchange.outputPartitioning,
+          shuffleExchange.child,
           ENSURE_REQUIREMENTS,
-          shuffleStage.child.output)
+          shuffleExchange.child.output,
+          shuffleExchange.advisoryPartitionSize)
         val serializer = shuffleWrite.columnarShuffleDependency.serializer
         val resultRDD = shuffleWrite.columnarShuffleDependency.rdd.mapPartitionsInternal {
           batches =>
@@ -300,10 +279,11 @@ object CHAggAndShuffleBenchmark extends SqlBasedBenchmark {
     chAllStagesBenchmark.addCase(s"Shuffle Read Stage", executedCnt) {
       _ =>
         val shuffleRead = ColumnarShuffleExchangeExec(
-          shuffleStage.outputPartitioning,
-          shuffleStage.child,
+          shuffleExchange.outputPartitioning,
+          shuffleExchange.child,
           ENSURE_REQUIREMENTS,
-          shuffleStage.child.output)
+          shuffleExchange.child.output,
+          shuffleExchange.advisoryPartitionSize)
 
         val resultRDD: RDD[Long] = shuffleRead.executeColumnar().mapPartitionsInternal {
           batches =>
@@ -322,9 +302,9 @@ object CHAggAndShuffleBenchmark extends SqlBasedBenchmark {
         .equalsIgnoreCase("sort")
     ) {
       // Get the file partitions for generating the `FileScanRDD`
-      val filePartitions = fileScan.getFlattenPartitions
+      val filePartitions = fileScan.getPartitions
         .map(_.asInstanceOf[FilePartition])
-      spark.conf.set("spark.gluten.enabled", "false")
+      spark.conf.set(GlutenConfig.GLUTEN_ENABLED.key, "false")
       val sparkExecutedPlan = allStages.queryExecution.executedPlan
 
       // Get the `FileSourceScanExec`
@@ -332,7 +312,7 @@ object CHAggAndShuffleBenchmark extends SqlBasedBenchmark {
 
       val sparkFileScan = vanillaScanPlan.head
       val relation = sparkFileScan.relation
-      val readFile: (PartitionedFile) => Iterator[InternalRow] =
+      val readFile: PartitionedFile => Iterator[InternalRow] =
         relation.fileFormat.buildReaderWithPartitionValues(
           sparkSession = relation.sparkSession,
           dataSchema = relation.dataSchema,
@@ -452,17 +432,5 @@ object CHAggAndShuffleBenchmark extends SqlBasedBenchmark {
 
       sparkAllStagesBenchmark.run()
     }
-  }
-
-  override def afterAll(): Unit = {
-    ClickHouseLog.clearCache()
-    val libPath = spark.conf.get(
-      GlutenConfig.GLUTEN_LIB_PATH,
-      UTSystemParameters
-        .getClickHouseLibPath())
-    JniLibLoader.unloadFromPath(libPath)
-    // Wait for Ctrl+C, convenient for seeing Spark UI
-    Thread.sleep(600000)
-    super.afterAll()
   }
 }

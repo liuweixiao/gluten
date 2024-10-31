@@ -1,17 +1,39 @@
-#include <Functions/FunctionFactory.h>
-#include <Common/CHUtil.h>
-#include <DataTypes/IDataType.h>
-#include <Core/Field.h>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 #include "FunctionParser.h"
+#include <memory>
+#include <Core/Field.h>
+#include <DataTypes/DataTypeNullable.h>
+#include <DataTypes/IDataType.h>
+#include <Functions/FunctionFactory.h>
+#include <Functions/FunctionHelpers.h>
+#include <Parser/TypeParser.h>
+#include <Common/BlockTypeUtils.h>
+#include <Common/CHUtil.h>
+#include "ExpressionParser.h"
 
 namespace DB
 {
 
 namespace ErrorCodes
 {
-    extern const int UNKNOWN_FUNCTION;
-    extern const int NOT_IMPLEMENTED;
+extern const int UNKNOWN_FUNCTION;
+extern const int NOT_IMPLEMENTED;
 }
 }
 
@@ -19,85 +41,105 @@ namespace local_engine
 {
 using namespace DB;
 
+FunctionParser::FunctionParser(ParserContextPtr ctx) : parser_context(ctx)
+{
+    expression_parser = std::make_unique<ExpressionParser>(parser_context);
+}
+
 String FunctionParser::getCHFunctionName(const substrait::Expression_ScalarFunction & substrait_func) const
 {
-    return getCHFunctionName(CommonFunctionInfo(substrait_func));
+    // no meaning
+    /// There is no any simple equivalent ch function.
+    return "";
 }
 
-String FunctionParser::getCHFunctionName(const DB::DataTypes &) const
+String FunctionParser::getUniqueName(const String & name) const
 {
-    throw DB::Exception(DB::ErrorCodes::NOT_IMPLEMENTED, "Not implemented");
+    return expression_parser->getUniqueName(name);
 }
 
-String FunctionParser::getCHFunctionName(const CommonFunctionInfo & func_info) const
+
+const DB::ActionsDAG::Node *
+FunctionParser::addColumnToActionsDAG(DB::ActionsDAG & actions_dag, const DB::DataTypePtr & type, const DB::Field & field) const
 {
-    auto func_signature = plan_parser->function_mapping.at(std::to_string(func_info.function_ref));
-    auto pos = func_signature.find(':');
-    auto func_name = func_signature.substr(0, pos);
-
-    auto it = SCALAR_FUNCTIONS.find(func_name);
-    if (it == SCALAR_FUNCTIONS.end())
-        throw Exception(ErrorCodes::UNKNOWN_FUNCTION, "Unsupported substrait function: {}", func_name);
-    return it->second;
+    return expression_parser->addConstColumn(actions_dag, type, field);
 }
 
-ActionsDAG::NodeRawConstPtrs FunctionParser::parseFunctionArguments(
-    const substrait::Expression_ScalarFunction & substrait_func,
-    const String & ch_func_name,
-    ActionsDAGPtr & actions_dag) const
+const DB::ActionsDAG::Node *
+FunctionParser::toFunctionNode(DB::ActionsDAG & action_dag, const String & func_name, const DB::ActionsDAG::NodeRawConstPtrs & args) const
 {
-    return parseFunctionArguments(CommonFunctionInfo(substrait_func), ch_func_name, actions_dag);
+    return expression_parser->toFunctionNode(action_dag, func_name, args);
 }
 
-DB::ActionsDAG::NodeRawConstPtrs FunctionParser::parseFunctionArguments(
-    const CommonFunctionInfo & func_info, const String & ch_func_name, DB::ActionsDAGPtr & actions_dag) const
+const DB::ActionsDAG::Node * FunctionParser::toFunctionNode(
+    DB::ActionsDAG & action_dag, const String & func_name, const String & result_name, const DB::ActionsDAG::NodeRawConstPtrs & args) const
+{
+    return expression_parser->toFunctionNode(action_dag, func_name, args, result_name);
+}
+
+const ActionsDAG::Node * FunctionParser::parseFunctionWithDAG(
+    const substrait::Expression & rel, std::string & result_name, DB::ActionsDAG & actions_dag, bool keep_result) const
+{
+    const auto * node = expression_parser->parseFunction(rel.scalar_function(), actions_dag, keep_result);
+    result_name = node->result_name;
+    return node;
+}
+
+const DB::ActionsDAG::Node * FunctionParser::parseExpression(DB::ActionsDAG & actions_dag, const substrait::Expression & rel) const
+{
+    return expression_parser->parseExpression(actions_dag, rel);
+}
+
+std::pair<DataTypePtr, Field> FunctionParser::parseLiteral(const substrait::Expression_Literal & literal) const
+{
+    return LiteralParser().parse(literal);
+}
+
+ActionsDAG::NodeRawConstPtrs
+FunctionParser::parseFunctionArguments(const substrait::Expression_ScalarFunction & substrait_func, ActionsDAG & actions_dag) const
 {
     ActionsDAG::NodeRawConstPtrs parsed_args;
-    const auto & args = func_info.arguments;
-    parsed_args.reserve(args.size());
-    for (const auto & arg : args)
-        plan_parser->parseFunctionArgument(actions_dag, parsed_args, ch_func_name, arg);
-    return parsed_args;
+    return expression_parser->parseFunctionArguments(actions_dag, substrait_func);
 }
 
-DB::ActionsDAG::NodeRawConstPtrs FunctionParser::parseFunctionArguments(
-    const CommonFunctionInfo & func_info, DB::ActionsDAGPtr & actions_dag) const
-{
-    return parseFunctionArguments(func_info, getCHFunctionName(func_info), actions_dag);
-}
 
-const ActionsDAG::Node * FunctionParser::parse(
-    const substrait::Expression_ScalarFunction & substrait_func,
-    ActionsDAGPtr & actions_dag) const
+const ActionsDAG::Node * FunctionParser::parse(const substrait::Expression_ScalarFunction & substrait_func, ActionsDAG & actions_dag) const
 {
     auto ch_func_name = getCHFunctionName(substrait_func);
-    auto parsed_args = parseFunctionArguments(substrait_func, ch_func_name, actions_dag);
+    auto parsed_args = parseFunctionArguments(substrait_func, actions_dag);
     const auto * func_node = toFunctionNode(actions_dag, ch_func_name, parsed_args);
     return convertNodeTypeIfNeeded(substrait_func, func_node, actions_dag);
 }
 
-const DB::ActionsDAG::Node * FunctionParser::parse(
-    const CommonFunctionInfo & func_info, ActionsDAGPtr & actions_dag) const
-{
-    auto ch_func_name = getCHFunctionName(func_info);
-    auto parsed_args = parseFunctionArguments(func_info, ch_func_name, actions_dag);
-    const auto * func_node = toFunctionNode(actions_dag, ch_func_name, parsed_args);
-    return convertNodeTypeIfNeeded(func_info, func_node, actions_dag);
-}
-
 const ActionsDAG::Node * FunctionParser::convertNodeTypeIfNeeded(
-    const substrait::Expression_ScalarFunction & substrait_func, const ActionsDAG::Node * func_node, ActionsDAGPtr & actions_dag) const
+    const substrait::Expression_ScalarFunction & substrait_func, const ActionsDAG::Node * func_node, ActionsDAG & actions_dag) const
 {
-    return convertNodeTypeIfNeeded(CommonFunctionInfo(substrait_func), func_node, actions_dag);
-}
-
-const DB::ActionsDAG::Node * FunctionParser::convertNodeTypeIfNeeded(
-    const CommonFunctionInfo & func_info, const DB::ActionsDAG::Node * func_node, DB::ActionsDAGPtr & actions_dag) const
-{
-    const auto & output_type = func_info.output_type;
-    if (!isTypeMatched(output_type, func_node->result_type))
-        return ActionsDAGUtil::convertNodeType(
-            actions_dag, func_node, SerializedPlanParser::parseType(output_type)->getName(), func_node->result_name);
+    const auto & output_type = substrait_func.output_type();
+    if (!TypeParser::isTypeMatched(output_type, func_node->result_type))
+    {
+        auto result_type = TypeParser::parseType(substrait_func.output_type());
+        if (DB::isDecimalOrNullableDecimal(result_type))
+        {
+            return ActionsDAGUtil::convertNodeType(
+                actions_dag,
+                func_node,
+                // as stated in isTypeMatched， currently we don't change nullability of the result type
+                func_node->result_type->isNullable() ? local_engine::wrapNullableType(true, result_type)
+                                                     : local_engine::removeNullable(result_type),
+                func_node->result_name,
+                CastType::accurateOrNull);
+        }
+        else
+        {
+            return ActionsDAGUtil::convertNodeType(
+                actions_dag,
+                func_node,
+                // as stated in isTypeMatched， currently we don't change nullability of the result type
+                func_node->result_type->isNullable() ? local_engine::wrapNullableType(true, TypeParser::parseType(output_type))
+                                                     : DB::removeNullable(TypeParser::parseType(output_type)),
+                func_node->result_name);
+        }
+    }
     else
         return func_node;
 }
@@ -108,9 +150,9 @@ void FunctionParserFactory::registerFunctionParser(const String & name, Value va
         throw Exception(ErrorCodes::LOGICAL_ERROR, "FunctionParserFactory: function parser name '{}' is not unique", name);
 }
 
-FunctionParserPtr FunctionParserFactory::get(const String & name, SerializedPlanParser * plan_parser)
+FunctionParserPtr FunctionParserFactory::get(const String & name, ParserContextPtr ctx)
 {
-    auto res = tryGet(name, plan_parser);
+    auto res = tryGet(name, ctx);
     if (!res)
     {
         throw Exception(ErrorCodes::UNKNOWN_FUNCTION, "Unknown function parser {}", name);
@@ -119,13 +161,13 @@ FunctionParserPtr FunctionParserFactory::get(const String & name, SerializedPlan
     return res;
 }
 
-FunctionParserPtr FunctionParserFactory::tryGet(const String & name, SerializedPlanParser * plan_parser)
+FunctionParserPtr FunctionParserFactory::tryGet(const String & name, ParserContextPtr ctx)
 {
     auto it = parsers.find(name);
     if (it != parsers.end())
     {
         auto creator = it->second;
-        return creator(plan_parser);
+        return creator(ctx);
     }
     else
         return {};

@@ -1,7 +1,27 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "CHUtil.h"
+
 #include <filesystem>
 #include <memory>
 #include <optional>
-#include <AggregateFunctions/AggregateFunctionCombinatorFactory.h>
+#include <unistd.h>
+#include <AggregateFunctions/Combinators/AggregateFunctionCombinatorFactory.h>
 #include <AggregateFunctions/registerAggregateFunctions.h>
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnConst.h>
@@ -10,59 +30,66 @@
 #include <Columns/IColumn.h>
 #include <Core/Block.h>
 #include <Core/ColumnWithTypeAndName.h>
-#include <Core/ColumnsWithTypeAndName.h>
+#include <Core/Defines.h>
 #include <Core/NamesAndTypes.h>
+#include <Core/Settings.h>
 #include <DataTypes/DataTypeArray.h>
+#include <DataTypes/DataTypeDateTime64.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypeTuple.h>
+#include <DataTypes/DataTypesDecimal.h>
 #include <DataTypes/DataTypesNumber.h>
-#include <DataTypes/IDataType.h>
 #include <DataTypes/NestedUtils.h>
-#include <DataTypes/Serializations/ISerialization.h>
-#include <Functions/CastOverloadResolver.h>
+#include <Disks/registerDisks.h>
+#include <Disks/registerGlutenDisks.h>
 #include <Functions/FunctionFactory.h>
-#include <Functions/FunctionsConversion.h>
+#include <Functions/FunctionHelpers.h>
 #include <Functions/registerFunctions.h>
-#include <IO/ReadBufferFromFile.h>
 #include <IO/SharedThreadPools.h>
 #include <Interpreters/JIT/CompiledExpressionCache.h>
-#include <Interpreters/castColumn.h>
-#include <Parser/RelParser.h>
-#include <Parser/SerializedPlanParser.h>
+#include <Parser/RelParsers/RelParser.h>
+#include <Planner/PlannerActionsVisitor.h>
 #include <Processors/Chunk.h>
+#include <Processors/QueryPlan/ExpressionStep.h>
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
 #include <QueryPipeline/printPipeline.h>
+#include <Storages/Cache/CacheManager.h>
+#include <Storages/MergeTree/StorageMergeTreeFactory.h>
 #include <Storages/Output/WriteBufferBuilder.h>
 #include <Storages/SubstraitSource/ReadBufferBuilder.h>
-#include <substrait/algebra.pb.h>
-#include <substrait/plan.pb.h>
+#include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/predicate.hpp>
+#include <sys/resource.h>
 #include <Poco/Logger.h>
 #include <Poco/Util/MapConfiguration.h>
+#include <Common/BitHelpers.h>
 #include <Common/Config/ConfigProcessor.h>
-#include <Common/Logger.h>
+#include <Common/CurrentThread.h>
+#include <Common/GlutenSignalHandler.h>
+#include <Common/LoggerExtend.h>
+#include <Common/QueryContext.h>
 #include <Common/logger_useful.h>
 #include <Common/typeid_cast.h>
 
-#include <boost/algorithm/string/case_conv.hpp>
-#include <boost/algorithm/string/predicate.hpp>
-
-#include <regex>
-#include "CHUtil.h"
-
 namespace DB
 {
+namespace Setting
+{
+extern const SettingsUInt64 prefer_external_sort_block_bytes;
+extern const SettingsUInt64 max_bytes_before_external_sort;
+}
 namespace ErrorCodes
 {
-    extern const int BAD_ARGUMENTS;
+extern const int BAD_ARGUMENTS;
+extern const int UNKNOWN_TYPE;
+extern const int CANNOT_PARSE_PROTOBUF_SCHEMA;
 }
 }
 
 namespace local_engine
 {
-constexpr auto VIRTUAL_ROW_COUNT_COLUMN = "__VIRTUAL_ROW_COUNT_COLUMN__";
-
 namespace fs = std::filesystem;
 
 DB::Block BlockUtil::buildRowCountHeader()
@@ -105,31 +132,57 @@ DB::Block BlockUtil::buildHeader(const DB::NamesAndTypesList & names_types_list)
     return DB::Block(cols);
 }
 
+/// The column names may be different in two blocks.
+/// and the nullability also could be different, with TPCDS-Q1 as an example.
+DB::ColumnWithTypeAndName
+BlockUtil::convertColumnAsNecessary(const DB::ColumnWithTypeAndName & column, const DB::ColumnWithTypeAndName & sample_column)
+{
+    if (sample_column.type->equals(*column.type))
+        return {column.column, column.type, sample_column.name};
+    else if (sample_column.type->isNullable() && !column.type->isNullable() && DB::removeNullable(sample_column.type)->equals(*column.type))
+    {
+        auto nullable_column = column;
+        DB::JoinCommon::convertColumnToNullable(nullable_column);
+        return {nullable_column.column, sample_column.type, sample_column.name};
+    }
+    else
+        throw DB::Exception(
+            DB::ErrorCodes::LOGICAL_ERROR,
+            "Columns have different types. original:{} expected:{}",
+            column.dumpStructure(),
+            sample_column.dumpStructure());
+}
+
 /**
  * There is a special case with which we need be careful. In spark, struct/map/list are always
  * wrapped in Nullable, but this should not happen in clickhouse.
  */
-DB::Block BlockUtil::flattenBlock(const DB::Block & block, UInt64 flags, bool recursively)
+DB::Block
+BlockUtil::flattenBlock(const DB::Block & block, UInt64 flags, bool recursively, const std::unordered_set<size_t> & columns_to_skip_flatten)
 {
     DB::Block res;
 
-    for (const auto & elem : block)
+    for (size_t col_i = 0; col_i < block.columns(); ++col_i)
     {
-        DB::DataTypePtr nested_type = nullptr;
-        DB::ColumnPtr nested_col = nullptr;
+        const auto & elem = block.getByPosition(col_i);
+
+        if (columns_to_skip_flatten.contains(col_i))
+        {
+            res.insert(elem);
+            continue;
+        }
+
+        DB::DataTypePtr nested_type = removeNullable(elem.type);
+        DB::ColumnPtr nested_col = elem.column;
         DB::ColumnPtr null_map_col = nullptr;
-        if (elem.type->isNullable())
+        // A special case, const(Nullable(nothing))
+        if (elem.type->isNullable() && typeid_cast<const DB::ColumnNullable *>(elem.column->getPtr().get()))
         {
-            nested_type = typeid_cast<const DB::DataTypeNullable *>(elem.type.get())->getNestedType();
-            const auto * null_col = typeid_cast<const DB::ColumnNullable *>(elem.column->getPtr().get());
-            nested_col = null_col->getNestedColumnPtr();
-            null_map_col = null_col->getNullMapColumnPtr();
+            const auto * nullable_col = typeid_cast<const DB::ColumnNullable *>(elem.column->getPtr().get());
+            nested_col = nullable_col->getNestedColumnPtr();
+            null_map_col = nullable_col->getNullMapColumnPtr();
         }
-        else
-        {
-            nested_type = elem.type;
-            nested_col = elem.column;
-        }
+
         if (const DB::DataTypeArray * type_arr = typeid_cast<const DB::DataTypeArray *>(nested_type.get()))
         {
             const DB::DataTypeTuple * type_tuple = typeid_cast<const DB::DataTypeTuple *>(type_arr->getNestedType().get());
@@ -159,6 +212,7 @@ DB::Block BlockUtil::flattenBlock(const DB::Block & block, UInt64 flags, bool re
                         is_const ? DB::ColumnConst::create(std::move(column_array_of_element), block.rows()) : column_array_of_element,
                         std::make_shared<DB::DataTypeArray>(element_types[i]),
                         nested_name);
+
                     if (null_map_col)
                     {
                         // Should all field columns have the same null map ?
@@ -167,41 +221,45 @@ DB::Block BlockUtil::flattenBlock(const DB::Block & block, UInt64 flags, bool re
                             = DB::ColumnNullable::create(named_column_array_of_element.column, null_map_col);
                         named_column_array_of_element.type = null_type;
                     }
+
                     if (recursively)
                     {
                         auto flatten_one_col_block = flattenBlock({named_column_array_of_element}, flags, recursively);
                         for (const auto & named_col : flatten_one_col_block.getColumnsWithTypeAndName())
-                        {
                             res.insert(named_col);
-                        }
                     }
                     else
-                    {
                         res.insert(named_column_array_of_element);
-                    }
                 }
             }
             else
-            {
                 res.insert(elem);
-            }
         }
         else if (const DB::DataTypeTuple * type_tuple = typeid_cast<const DB::DataTypeTuple *>(nested_type.get()))
         {
-            if (type_tuple->haveExplicitNames() && (flags & FLAT_STRUCT))
+            if ((flags & FLAT_STRUCT_FORCE) || (type_tuple->haveExplicitNames() && (flags & FLAT_STRUCT)))
             {
                 const DB::DataTypes & element_types = type_tuple->getElements();
-                const DB::Strings & names = type_tuple->getElementNames();
+                DB::Strings element_names = type_tuple->getElementNames();
+                if (element_names.empty())
+                {
+                    // This is a struct without named fields, we should flatten it.
+                    // But we can't get the field names, so we use the field index as the field name.
+                    for (size_t i = 0; i < element_types.size(); ++i)
+                        element_names.push_back(elem.name + "_filed_" + std::to_string(i));
+                }
+
                 const DB::ColumnTuple * column_tuple;
                 if (isColumnConst(*nested_col))
                     column_tuple = typeid_cast<const DB::ColumnTuple *>(&assert_cast<const DB::ColumnConst &>(*nested_col).getDataColumn());
                 else
                     column_tuple = typeid_cast<const DB::ColumnTuple *>(nested_col.get());
+
                 size_t tuple_size = column_tuple->tupleSize();
                 for (size_t i = 0; i < tuple_size; ++i)
                 {
                     const auto & element_column = column_tuple->getColumn(i);
-                    String nested_name = DB::Nested::concatenateName(elem.name, names[i]);
+                    String nested_name = DB::Nested::concatenateName(elem.name, element_names[i]);
                     auto new_element_col = DB::ColumnWithTypeAndName(element_column.getPtr(), element_types[i], nested_name);
                     if (null_map_col && !element_types[i]->isNullable())
                     {
@@ -209,80 +267,153 @@ DB::Block BlockUtil::flattenBlock(const DB::Block & block, UInt64 flags, bool re
                         new_element_col.column = DB::ColumnNullable::create(new_element_col.column, null_map_col);
                         new_element_col.type = std::make_shared<DB::DataTypeNullable>(new_element_col.type);
                     }
+
                     if (recursively)
                     {
                         DB::Block one_col_block({new_element_col});
                         auto flatten_one_col_block = flattenBlock(one_col_block, flags, recursively);
                         for (const auto & named_col : flatten_one_col_block.getColumnsWithTypeAndName())
-                        {
                             res.insert(named_col);
-                        }
                     }
                     else
-                    {
                         res.insert(std::move(new_element_col));
-                    }
                 }
             }
             else
-            {
                 res.insert(elem);
-            }
         }
         else
-        {
             res.insert(elem);
-        }
     }
 
     return res;
 }
 
+DB::Block BlockUtil::concatenateBlocksMemoryEfficiently(std::vector<DB::Block> && blocks)
+{
+    if (blocks.empty())
+        return {};
+
+    size_t num_rows = 0;
+    for (const auto & block : blocks)
+        num_rows += block.rows();
+
+    Block out = blocks[0].cloneEmpty();
+    MutableColumns columns = out.mutateColumns();
+
+    for (size_t i = 0; i < columns.size(); ++i)
+    {
+        columns[i]->reserve(num_rows);
+        for (auto & block : blocks)
+        {
+            const auto & tmp_column = *block.getByPosition(0).column;
+            columns[i]->insertRangeFrom(tmp_column, 0, block.rows());
+            block.erase(0);
+        }
+    }
+    blocks.clear();
+
+    out.setColumns(std::move(columns));
+    return out;
+}
+
+size_t PODArrayUtil::adjustMemoryEfficientSize(size_t n)
+{
+    /// According to definition of DEFUALT_BLOCK_SIZE
+    size_t padding_n = 2 * PADDING_FOR_SIMD - 1;
+    size_t rounded_n = roundUpToPowerOfTwoOrZero(n);
+    size_t padded_n = n;
+    if (rounded_n > n + n / 2)
+    {
+        size_t smaller_rounded_n = rounded_n / 2;
+        padded_n = smaller_rounded_n < padding_n ? n : smaller_rounded_n - padding_n;
+    }
+    else
+    {
+        padded_n = rounded_n - padding_n;
+    }
+    return padded_n;
+}
+
 std::string PlanUtil::explainPlan(DB::QueryPlan & plan)
 {
-    std::string plan_str;
-    DB::QueryPlan::ExplainPlanOptions buf_opt{
+    constexpr DB::QueryPlan::ExplainPlanOptions buf_opt{
         .header = true,
         .actions = true,
         .indexes = true,
     };
     DB::WriteBufferFromOwnString buf;
     plan.explainPlan(buf, buf_opt);
-    plan_str = buf.str();
-    return plan_str;
+
+    return buf.str();
 }
 
-std::vector<MergeTreeUtil::Path> MergeTreeUtil::getAllMergeTreeParts(const Path & storage_path)
+void PlanUtil::checkOuputType(const DB::QueryPlan & plan)
 {
-    if (!fs::exists(storage_path))
-    {
-        throw DB::Exception(DB::ErrorCodes::BAD_ARGUMENTS, "Invalid merge tree store path:{}", storage_path.string());
-    }
+    // QueryPlan::checkInitialized is a private method, so we assume plan is initialized, otherwise there is a core dump here.
+    // It's okay, because it's impossible for us not to initialize where we call this method.
+    const auto & step = *plan.getRootNode()->step;
 
-    // TODO: May need to check the storage format version
-    std::vector<fs::path> res;
-    for (const auto & entry : fs::directory_iterator(storage_path))
+    if (!step.hasOutputHeader())
+        return;
+    for (const auto & elem : step.getOutputHeader())
     {
-        auto filename = entry.path().filename();
-        if (filename == "format_version.txt" || filename == "detached" || filename == "_delta_log")
-            continue;
-        res.push_back(entry.path());
+        const DB::DataTypePtr & ch_type = elem.type;
+        const auto ch_type_without_nullable = DB::removeNullable(ch_type);
+        const DB::WhichDataType which(ch_type_without_nullable);
+        if (which.isDateTime64())
+        {
+            const auto * ch_type_datetime64 = checkAndGetDataType<DataTypeDateTime64>(ch_type_without_nullable.get());
+            if (ch_type_datetime64->getScale() != 6)
+                throw Exception(ErrorCodes::UNKNOWN_TYPE, "Spark doesn't support converting from {}", ch_type->getName());
+        }
+        else if (which.isDecimal())
+        {
+            if (which.isDecimal256())
+                throw Exception(ErrorCodes::UNKNOWN_TYPE, "Spark doesn't support converting from {}", ch_type->getName());
+
+            const auto scale = getDecimalScale(*ch_type_without_nullable);
+            const auto precision = getDecimalPrecision(*ch_type_without_nullable);
+            if (scale == 0 && precision == 0)
+                throw Exception(ErrorCodes::UNKNOWN_TYPE, "Spark doesn't support converting from {}", ch_type->getName());
+        }
     }
-    return res;
 }
 
-DB::NamesAndTypesList MergeTreeUtil::getSchemaFromMergeTreePart(const fs::path & part_path)
+DB::IQueryPlanStep * PlanUtil::adjustQueryPlanHeader(DB::QueryPlan & plan, const DB::Block & to_header, const String & step_desc)
 {
-    DB::NamesAndTypesList names_types_list;
-    if (!fs::exists(part_path))
-    {
-        throw DB::Exception(DB::ErrorCodes::BAD_ARGUMENTS, "Invalid merge tree store path:{}", part_path.string());
-    }
-    DB::ReadBufferFromFile readbuffer((part_path / "columns.txt").string());
-    names_types_list.readText(readbuffer);
-    return names_types_list;
+    auto convert_actions_dag = DB::ActionsDAG::makeConvertingActions(
+        plan.getCurrentHeader().getColumnsWithTypeAndName(),
+        to_header.getColumnsWithTypeAndName(),
+        ActionsDAG::MatchColumnsMode::Name);
+    auto expression_step = std::make_unique<DB::ExpressionStep>(plan.getCurrentHeader(), std::move(convert_actions_dag));
+    expression_step->setStepDescription(step_desc);
+    auto * step_ptr = expression_step.get();
+    plan.addStep(std::move(expression_step));
+    return step_ptr;
 }
 
+DB::IQueryPlanStep * PlanUtil::addRemoveNullableStep(DB::ContextPtr context, DB::QueryPlan & plan, const std::set<String> & columns)
+{
+    if (columns.empty())
+        return nullptr;
+    DB::ActionsDAG remove_nullable_actions_dag{plan.getCurrentHeader().getColumnsWithTypeAndName()};
+    for (const auto & col_name : columns)
+    {
+        if (const auto * required_node = remove_nullable_actions_dag.tryFindInOutputs(col_name))
+        {
+            auto function_builder = DB::FunctionFactory::instance().get("assumeNotNull", context);
+            DB::ActionsDAG::NodeRawConstPtrs args = {required_node};
+            const auto & node = remove_nullable_actions_dag.addFunction(function_builder, args, col_name);
+            remove_nullable_actions_dag.addOrReplaceInOutputs(node);
+        }
+    }
+    auto expression_step = std::make_unique<DB::ExpressionStep>(plan.getCurrentHeader(), std::move(remove_nullable_actions_dag));
+    expression_step->setStepDescription("Remove nullable properties");
+    auto * step_ptr = expression_step.get();
+    plan.addStep(std::move(expression_step));
+    return step_ptr;
+}
 
 NestedColumnExtractHelper::NestedColumnExtractHelper(const DB::Block & block_, bool case_insentive_)
     : block(block_), case_insentive(case_insentive_)
@@ -317,9 +448,7 @@ std::optional<DB::ColumnWithTypeAndName> NestedColumnExtractHelper::extractColum
 {
     auto table_iter = nested_tables.find(column_name_prefix);
     if (table_iter == nested_tables.end())
-    {
         return {};
-    }
 
     auto & nested_table = table_iter->second;
     auto nested_names = DB::Nested::splitName(column_name_suffix);
@@ -341,9 +470,7 @@ std::optional<DB::ColumnWithTypeAndName> NestedColumnExtractHelper::extractColum
 
     const auto * sub_col = findColumn(*nested_table, new_column_name_prefix);
     if (!sub_col)
-    {
         return {};
-    }
 
     DB::ColumnsWithTypeAndName columns = {*sub_col};
     DB::Block sub_block(columns);
@@ -360,9 +487,7 @@ const DB::ColumnWithTypeAndName * NestedColumnExtractHelper::findColumn(const DB
         const auto & cols = in_block.getColumnsWithTypeAndName();
         auto found = std::find_if(cols.begin(), cols.end(), [&](const auto & column) { return boost::iequals(column.name, name); });
         if (found == cols.end())
-        {
             return nullptr;
-        }
         return &*found;
     }
 
@@ -373,20 +498,37 @@ const DB::ColumnWithTypeAndName * NestedColumnExtractHelper::findColumn(const DB
 }
 
 const DB::ActionsDAG::Node * ActionsDAGUtil::convertNodeType(
-    DB::ActionsDAGPtr & actions_dag, const DB::ActionsDAG::Node * node, const std::string & type_name, const std::string & result_name)
+    DB::ActionsDAG & actions_dag,
+    const DB::ActionsDAG::Node * node,
+    const DataTypePtr & cast_to_type,
+    const std::string & result_name,
+    CastType cast_type)
 {
     DB::ColumnWithTypeAndName type_name_col;
-    type_name_col.name = type_name;
+    type_name_col.name = cast_to_type->getName();
     type_name_col.column = DB::DataTypeString().createColumnConst(0, type_name_col.name);
     type_name_col.type = std::make_shared<DB::DataTypeString>();
-    const auto * right_arg = &actions_dag->addColumn(std::move(type_name_col));
+    const auto * right_arg = &actions_dag.addColumn(std::move(type_name_col));
     const auto * left_arg = node;
-    DB::FunctionCastBase::Diagnostic diagnostic = {node->result_name, node->result_name};
-    DB::FunctionOverloadResolverPtr func_builder_cast
-        = DB::CastInternalOverloadResolver<DB::CastType::nonAccurate>::createImpl(std::move(diagnostic));
-
+    DB::CastDiagnostic diagnostic = {node->result_name, node->result_name};
+    ColumnWithTypeAndName left_column{nullptr, node->result_type, {}};
     DB::ActionsDAG::NodeRawConstPtrs children = {left_arg, right_arg};
-    return &actions_dag->addFunction(func_builder_cast, std::move(children), result_name);
+    auto func_base_cast = createInternalCast(std::move(left_column), cast_to_type, cast_type, diagnostic);
+
+    return &actions_dag.addFunction(func_base_cast, std::move(children), result_name);
+}
+
+const DB::ActionsDAG::Node * ActionsDAGUtil::convertNodeTypeIfNeeded(
+    DB::ActionsDAG & actions_dag,
+    const DB::ActionsDAG::Node * node,
+    const DB::DataTypePtr & dst_type,
+    const std::string & result_name,
+    CastType cast_type)
+{
+    if (node->result_type->equals(*dst_type))
+        return node;
+
+    return convertNodeType(actions_dag, node, dst_type, result_name, cast_type);
 }
 
 String QueryPipelineUtil::explainPipeline(DB::QueryPipeline & pipeline)
@@ -399,142 +541,139 @@ String QueryPipelineUtil::explainPipeline(DB::QueryPipeline & pipeline)
 
 using namespace DB;
 
-std::map<std::string, std::string> BackendInitializerUtil::getBackendConfMap(const std::string & plan)
+std::vector<String> BackendInitializerUtil::wrapDiskPathConfig(
+    const String & path_prefix, const String & path_suffix, Poco::Util::AbstractConfiguration & config)
 {
-    std::map<std::string, std::string> ch_backend_conf;
+    std::vector<String> changed_paths;
+    if (path_prefix.empty() && path_suffix.empty())
+        return changed_paths;
 
-    /// Parse backend configs from plan extensions
-    do
+    auto change_func = [&](String key) -> void
     {
-        auto plan_ptr = std::make_unique<substrait::Plan>();
-        auto success = plan_ptr->ParseFromString(plan);
-        if (!success)
-            break;
-
-        if (!plan_ptr->has_advanced_extensions() || !plan_ptr->advanced_extensions().has_enhancement())
-            break;
-        const auto & enhancement = plan_ptr->advanced_extensions().enhancement();
-
-        if (!enhancement.Is<substrait::Expression>())
-            break;
-
-        substrait::Expression expression;
-        if (!enhancement.UnpackTo(&expression) || !expression.has_literal() || !expression.literal().has_map())
-            break;
-
-        const auto & key_values = expression.literal().map().key_values();
-        for (const auto & key_value : key_values)
+        if (const String value = config.getString(key, ""); value != "")
         {
-            if (!key_value.has_key() || !key_value.has_value())
-                continue;
-
-            const auto & key = key_value.key();
-            const auto & value = key_value.value();
-            if (!key.has_string() || !value.has_string())
-                continue;
-
-            ch_backend_conf[key.string()] = value.string();
+            const String change_value = path_prefix + value + path_suffix;
+            config.setString(key, change_value);
+            changed_paths.emplace_back(change_value);
+            LOG_INFO(getLogger("BackendInitializerUtil"), "Change config `{}` from '{}' to {}.", key, value, change_value);
         }
-    } while (false);
+    };
 
-    if (!ch_backend_conf.count(CH_RUNTIME_CONFIG_FILE))
-    {
-        /// Try to get config path from environment variable
-        const char * config_path = std::getenv("CLICKHOUSE_BACKEND_CONFIG"); /// NOLINT
-        if (config_path)
-            ch_backend_conf[CH_RUNTIME_CONFIG_FILE] = config_path;
-    }
-    return ch_backend_conf;
+    Poco::Util::AbstractConfiguration::Keys disks;
+    std::unordered_set<String> disk_types = {"s3_gluten", "hdfs_gluten", "cache"};
+    config.keys("storage_configuration.disks", disks);
+
+    std::ranges::for_each(
+        disks,
+        [&](const auto & disk_name)
+        {
+            String disk_prefix = "storage_configuration.disks." + disk_name;
+            String disk_type = config.getString(disk_prefix + ".type", "");
+            if (!disk_types.contains(disk_type))
+                return;
+            if (disk_type == "cache")
+                change_func(disk_prefix + ".path");
+            else if (disk_type == "s3_gluten" || disk_type == "hdfs_gluten")
+                change_func(disk_prefix + ".metadata_path");
+        });
+
+    change_func("path");
+    change_func("gluten_cache.local.path");
+
+    return changed_paths;
 }
 
-void BackendInitializerUtil::initConfig(std::string * plan)
+DB::Context::ConfigurationPtr BackendInitializerUtil::initConfig(const std::map<std::string, std::string> & spark_conf_map)
 {
-    if (plan == nullptr)
-    {
-        config = Poco::AutoPtr(new Poco::Util::MapConfiguration());
-        return;
-    }
+    DB::Context::ConfigurationPtr config;
 
-    /// Parse input substrait plan, and get native conf map from it.
-    backend_conf_map = getBackendConfMap(*plan);
-    if (backend_conf_map.count(CH_RUNTIME_CONFIG_FILE))
+    if (const String config_file = tryGetConfigFile(spark_conf_map); !config_file.empty())
     {
-        if (fs::exists(CH_RUNTIME_CONFIG_FILE) && fs::is_regular_file(CH_RUNTIME_CONFIG_FILE))
+        if (fs::exists(config_file) && fs::is_regular_file(config_file))
         {
-            ConfigProcessor config_processor(CH_RUNTIME_CONFIG_FILE, false, true);
-            config_processor.setConfigPath(fs::path(CH_RUNTIME_CONFIG_FILE).parent_path());
-            auto loaded_config = config_processor.loadConfig(false);
+            ConfigProcessor config_processor(config_file, false, true);
+            DB::ConfigProcessor::setConfigPath(fs::path(config_file).parent_path());
+            const auto loaded_config = config_processor.loadConfig(false);
             config = loaded_config.configuration;
         }
         else
-            throw DB::Exception(DB::ErrorCodes::BAD_ARGUMENTS, "{} is not a valid configure file.", CH_RUNTIME_CONFIG_FILE);
+            throw DB::Exception(DB::ErrorCodes::BAD_ARGUMENTS, "{} is not a valid configure file.", config_file);
     }
     else
         config = Poco::AutoPtr(new Poco::Util::MapConfiguration());
 
-    for (const auto & kv : backend_conf_map)
+    for (const auto & [key, value] : spark_conf_map)
     {
-        const auto & key = kv.first;
-        const auto & value = kv.second;
-        // std::cout << "set config key:" << key << ", value:" << value << std::endl;
-
         if (key.starts_with(CH_RUNTIME_CONFIG_PREFIX) && key != CH_RUNTIME_CONFIG_FILE)
         {
-            /// Apply spark.gluten.sql.columnar.backend.ch.runtime_config.* to config
-            config->setString(key.substr(CH_RUNTIME_CONFIG_PREFIX.size()), value);
+            // Apply spark.gluten.sql.columnar.backend.ch.runtime_config.* to config
+            const auto name = key.substr(CH_RUNTIME_CONFIG_PREFIX.size());
+            if ((name == "storage_configuration.disks.s3.metadata_path" || name == "path") && !value.ends_with("/"))
+                config->setString(name, value + "/");
+            else
+                config->setString(name, value);
         }
-        else if (key.starts_with(SPARK_HADOOP_PREFIX + S3A_PREFIX + "bucket"))
-        {
-            // deal with per bucket S3 configs, e.g. fs.s3a.bucket.bucket_name.assumed.role.arn
-            // for gluten, we require first authenticate with AK/SK(or instance profile), then assume other roles with STS
-            // so only the following per-bucket configs are supported:
-            // 1. fs.s3a.bucket.bucket_name.assumed.role.arn
-            // 2. fs.s3a.bucket.bucket_name.assumed.role.session.name
-            // 3. fs.s3a.bucket.bucket_name.endpoint
-            // 4. fs.s3a.bucket.bucket_name.assumed.role.externalId (non hadoop official)
-
-            // for spark.hadoop.fs.s3a.bucket.bucket_name.assumed.role.arn, put bucket_name.fs.s3a.assumed.role.arn into config
-            std::regex base_regex("bucket\\.([^\\.]+)\\.");
-            std::smatch base_match;
-            std::string new_key = key.substr(SPARK_HADOOP_PREFIX.length());
-            if (std::regex_search(new_key, base_match, base_regex))
-            {
-                std::string bucket_name = base_match[1].str();
-                new_key.replace(base_match[0].first - new_key.begin(), base_match[0].second - base_match[0].first, "");
-                config->setString(bucket_name + "." + new_key, value);
-            }
-        }
-        else if (key.starts_with(SPARK_HADOOP_PREFIX + S3A_PREFIX))
-        {
-            // Apply general S3 configs, e.g. spark.hadoop.fs.s3a.access.key -> set in fs.s3a.access.key
-            config->setString(key.substr(SPARK_HADOOP_PREFIX.length()), value);
-        }
-
     }
+
+    if (spark_conf_map.contains(GLUTEN_TASK_OFFHEAP))
+        config->setString(MemoryConfig::CH_TASK_MEMORY, spark_conf_map.at(GLUTEN_TASK_OFFHEAP));
+
+    const bool use_current_directory_as_tmp = config->getBool("use_current_directory_as_tmp", false);
+    char buffer[PATH_MAX];
+    if (use_current_directory_as_tmp && getcwd(buffer, sizeof(buffer)) != nullptr)
+        wrapDiskPathConfig(String(buffer), "", *config);
+
+    const bool reuse_disk_cache = config->getBool("reuse_disk_cache", true);
+
+    if (!reuse_disk_cache)
+    {
+        String pid = std::to_string(static_cast<Int64>(getpid()));
+        auto path_need_clean = wrapDiskPathConfig("", "/" + pid, *config);
+        std::lock_guard lock(BackendFinalizerUtil::paths_mutex);
+        BackendFinalizerUtil::paths_need_to_clean.insert(
+            BackendFinalizerUtil::paths_need_to_clean.end(), path_need_clean.begin(), path_need_clean.end());
+    }
+    return config;
 }
 
-void BackendInitializerUtil::initLoggers()
+String BackendInitializerUtil::tryGetConfigFile(const std::map<std::string, std::string> & spark_conf_map)
 {
-    auto level = config->getString("logger.level", "error");
+    if (spark_conf_map.contains(CH_RUNTIME_CONFIG_FILE))
+        return spark_conf_map.at(CH_RUNTIME_CONFIG_FILE);
+
+    /// Try to get config path from environment variable
+    if (const char * config_path = std::getenv("CLICKHOUSE_BACKEND_CONFIG"))
+        return config_path;
+
+    return String{};
+}
+
+
+void BackendInitializerUtil::initLoggers(DB::Context::ConfigurationPtr config)
+{
+    auto level = config->getString("logger.level", "warning");
     if (config->has("logger.log"))
-        local_engine::Logger::initFileLogger(*config, "ClickHouseBackend");
+        local_engine::LoggerExtend::initFileLogger(*config, "ClickHouseBackend");
     else
-        local_engine::Logger::initConsoleLogger(level);
+        local_engine::LoggerExtend::initConsoleLogger(level);
 
     logger = &Poco::Logger::get("ClickHouseBackend");
 }
 
-void BackendInitializerUtil::initEnvs()
+void BackendInitializerUtil::initEnvs(DB::Context::ConfigurationPtr config)
 {
     /// Set environment variable TZ if possible
     if (config->has("timezone"))
     {
-        String timezone_name = config->getString("timezone");
-        if (0 != setenv("TZ", timezone_name.data(), 1)) /// NOLINT
+        const std::string config_timezone = config->getString("timezone");
+        const String mapped_timezone = DateTimeUtil::convertTimeZone(config_timezone);
+        if (0
+            != setenv(
+                "TZ", mapped_timezone.data(), 1)) // NOLINT(concurrency-mt-unsafe) // ok if not called concurrently with other setenv/getenv
             throw Poco::Exception("Cannot setenv TZ variable");
 
         tzset();
-        DateLUT::setDefaultTimezone(timezone_name);
+        DateLUT::setDefaultTimezone(mapped_timezone);
     }
 
     /// Set environment variable LIBHDFS3_CONF if possible
@@ -546,68 +685,135 @@ void BackendInitializerUtil::initEnvs()
 
     /// Enable logging in libhdfs3, logs will be written to stderr
     setenv("HDFS_ENABLE_LOGGING", "true", true); /// NOLINT
+
+    /// Get environment varaible SPARK_USER if possible
+    if (const char * spark_user_c_str = std::getenv("SPARK_USER"))
+        spark_user = spark_user_c_str;
 }
 
-void BackendInitializerUtil::initSettings()
+DB::Field BackendInitializerUtil::toField(const String & key, const String & value)
 {
-    static const std::string settings_path("local_engine.settings");
+    if (BOOL_VALUE_SETTINGS.contains(key))
+        return DB::Field(value == "true" || value == "1");
+    else if (LONG_VALUE_SETTINGS.contains(key))
+        return DB::Field(std::strtoll(value.c_str(), nullptr, 10));
+    else
+        return DB::Field(value);
+}
 
-    settings = Settings();
-
+void BackendInitializerUtil::initSettings(const std::map<std::string, std::string> & spark_conf_map, DB::Settings & settings)
+{
     /// Initialize default setting.
     settings.set("date_time_input_format", "best_effort");
+    settings.set(MERGETREE_MERGE_AFTER_INSERT, true);
+    settings.set(MERGETREE_INSERT_WITHOUT_LOCAL_STORAGE, false);
+    settings.set(DECIMAL_OPERATIONS_ALLOW_PREC_LOSS, true);
+    settings.set("remote_filesystem_read_prefetch", false);
+    settings.set("max_parsing_threads", 1);
+    settings.set("max_download_threads", 1);
+    settings.set("input_format_parquet_enable_row_group_prefetch", false);
 
-    Poco::Util::AbstractConfiguration::Keys config_keys;
-    config->keys(settings_path, config_keys);
-
-    /// Firstly apply section [local_engine.settings] in config file to settings
-    for (const std::string & key : config_keys)
-        settings.set(key, config->getString(settings_path + "." + key));
-
-    /// Secondly apply spark.gluten.sql.columnar.backend.ch.runtime_settings.* to settings
-    for (const auto & kv : backend_conf_map)
+    for (const auto & [key, value] : spark_conf_map)
     {
-        const auto & key = kv.first;
-        const auto & value = kv.second;
-        if (key.starts_with(CH_RUNTIME_SETTINGS_PREFIX))
-            settings.set(key.substr(CH_RUNTIME_SETTINGS_PREFIX.size()), value);
+        // Firstly apply spark.gluten.sql.columnar.backend.ch.runtime_config.local_engine.settings.* to settings
+        if (key.starts_with(CH_RUNTIME_CONFIG_PREFIX + SETTINGS_PATH + "."))
+        {
+            settings.set(key.substr((CH_RUNTIME_CONFIG_PREFIX + SETTINGS_PATH + ".").size()), value);
+            LOG_DEBUG(&Poco::Logger::get("CHUtil"), "Set settings from config key:{} value:{}", key, value);
+        }
+        else if (key.starts_with(CH_RUNTIME_SETTINGS_PREFIX))
+        {
+            auto k = key.substr(CH_RUNTIME_SETTINGS_PREFIX.size());
+            settings.set(k, toField(k, value));
+            LOG_DEBUG(&Poco::Logger::get("CHUtil"), "Set settings key:{} value:{}", key, value);
+        }
+        else if (key.starts_with(SPARK_HADOOP_PREFIX + S3A_PREFIX))
+        {
+            // Apply general S3 configs, e.g. spark.hadoop.fs.s3a.access.key -> set in fs.s3a.access.key
+            // deal with per bucket S3 configs, e.g. fs.s3a.bucket.bucket_name.assumed.role.arn
+            // for gluten, we require first authenticate with AK/SK(or instance profile), then assume other roles with STS
+            // so only the following per-bucket configs are supported:
+            // 1. fs.s3a.bucket.bucket_name.assumed.role.arn
+            // 2. fs.s3a.bucket.bucket_name.assumed.role.session.name
+            // 3. fs.s3a.bucket.bucket_name.endpoint
+            // 4. fs.s3a.bucket.bucket_name.assumed.role.externalId (non hadoop official)
+            settings.set(key.substr(SPARK_HADOOP_PREFIX.length()), value);
+        }
+        else if (key.starts_with(SPARK_DELTA_PREFIX))
+        {
+            auto k = key.substr(SPARK_DELTA_PREFIX.size());
+            settings.set(k, toField(k, value));
+            LOG_DEBUG(&Poco::Logger::get("CHUtil"), "Set settings key:{} value:{}", key, value);
+        }
+        else if (key == SPARK_SESSION_TIME_ZONE)
+        {
+            String time_zone_val = DateTimeUtil::convertTimeZone(value);
+            settings.set("session_timezone", time_zone_val);
+            LOG_DEBUG(&Poco::Logger::get("CHUtil"), "Set settings key:{} value:{}", "session_timezone", time_zone_val);
+        }
+        else if (key == DECIMAL_OPERATIONS_ALLOW_PREC_LOSS)
+        {
+            settings.set(key, toField(key, value));
+            LOG_DEBUG(&Poco::Logger::get("CHUtil"), "Set settings key:{} value:{}", key, value);
+        }
     }
-
     /// Finally apply some fixed kvs to settings.
     settings.set("join_use_nulls", true);
     settings.set("input_format_orc_allow_missing_columns", true);
     settings.set("input_format_orc_case_insensitive_column_matching", true);
     settings.set("input_format_orc_import_nested", true);
+    settings.set("input_format_orc_skip_columns_with_unsupported_types_in_schema_inference", true);
     settings.set("input_format_parquet_allow_missing_columns", true);
     settings.set("input_format_parquet_case_insensitive_column_matching", true);
     settings.set("input_format_parquet_import_nested", true);
+    settings.set("input_format_json_read_numbers_as_strings", true);
+    settings.set("input_format_json_read_bools_as_numbers", false);
+    settings.set("input_format_csv_trim_whitespaces", false);
+    settings.set("input_format_csv_allow_cr_end_of_line", true);
+    settings.set("output_format_orc_string_as_string", true);
     settings.set("output_format_parquet_version", "1.0");
     settings.set("output_format_parquet_compression_method", "snappy");
     settings.set("output_format_parquet_string_as_string", true);
     settings.set("output_format_parquet_fixed_string_as_fixed_byte_array", false);
+    settings.set("output_format_json_quote_64bit_integers", false);
+    settings.set("output_format_json_quote_denormals", true);
+    settings.set("output_format_json_skip_null_value_in_named_tuples", true);
+    settings.set("output_format_json_escape_forward_slashes", false);
     settings.set("function_json_value_return_type_allow_complex", true);
     settings.set("function_json_value_return_type_allow_nullable", true);
+    settings.set("precise_float_parsing", true);
+    settings.set("enable_named_columns_in_function_tuple", false);
+    settings.set("date_time_64_output_format_cut_trailing_zeros_align_to_groups_of_thousands", true);
+    settings.set("input_format_orc_dictionary_as_low_cardinality", false); //after https://github.com/ClickHouse/ClickHouse/pull/69481
+
+    if (spark_conf_map.contains(GLUTEN_TASK_OFFHEAP))
+    {
+        auto task_memory = std::stoull(spark_conf_map.at(GLUTEN_TASK_OFFHEAP));
+        if (!spark_conf_map.contains(CH_RUNTIME_SETTINGS_PREFIX + "max_bytes_before_external_sort"))
+        {
+            settings[Setting::max_bytes_before_external_sort] = static_cast<size_t>(0.8 * task_memory);
+        }
+        if (!spark_conf_map.contains(CH_RUNTIME_SETTINGS_PREFIX + "prefer_external_sort_block_bytes"))
+        {
+            auto mem_gb = task_memory / static_cast<double>(1_GiB);
+            // 2.8x+5, Heuristics calculate the block size of external sort, [8,16]
+            settings[Setting::prefer_external_sort_block_bytes] = std::max(std::min(static_cast<size_t>(2.8 * mem_gb + 5), 16ul), 8ul) * 1024 * 1024;
+        }
+    }
 }
 
-void BackendInitializerUtil::initContexts()
+void BackendInitializerUtil::initContexts(DB::Context::ConfigurationPtr config)
 {
     /// Make sure global_context and shared_context are constructed only once.
-    auto & shared_context = SerializedPlanParser::shared_context;
-    if (!shared_context.get())
+    if (auto global_context = QueryContext::globalMutableContext(); !global_context)
     {
-        shared_context = SharedContextHolder(Context::createShared());
-    }
-
-    auto & global_context = SerializedPlanParser::global_context;
-    if (!global_context)
-    {
-        global_context = Context::createGlobal(shared_context.get());
+        global_context = QueryContext::createGlobal();
         global_context->makeGlobalContext();
         global_context->setConfig(config);
 
-        auto getDefaultPath = [] -> auto
+        auto getDefaultPath = [config] -> auto
         {
-            bool use_current_directory_as_tmp = config->getBool("use_current_directory_as_tmp", false);
+            const bool use_current_directory_as_tmp = config->getBool("use_current_directory_as_tmp", false);
             char buffer[PATH_MAX];
             if (use_current_directory_as_tmp && getcwd(buffer, sizeof(buffer)) != nullptr)
                 return std::string(buffer) + "/tmp/libch";
@@ -617,24 +823,70 @@ void BackendInitializerUtil::initContexts()
 
         global_context->setTemporaryStoragePath(config->getString("tmp_path", getDefaultPath()), 0);
         global_context->setPath(config->getString("path", "/"));
+
+        String uncompressed_cache_policy = config->getString("uncompressed_cache_policy", DEFAULT_UNCOMPRESSED_CACHE_POLICY);
+        size_t uncompressed_cache_size = config->getUInt64("uncompressed_cache_size", DEFAULT_UNCOMPRESSED_CACHE_MAX_SIZE);
+        double uncompressed_cache_size_ratio = config->getDouble("uncompressed_cache_size_ratio", DEFAULT_UNCOMPRESSED_CACHE_SIZE_RATIO);
+        global_context->setUncompressedCache(uncompressed_cache_policy, uncompressed_cache_size, uncompressed_cache_size_ratio);
+
+        String mark_cache_policy = config->getString("mark_cache_policy", DEFAULT_MARK_CACHE_POLICY);
+        size_t mark_cache_size = config->getUInt64("mark_cache_size", DEFAULT_MARK_CACHE_MAX_SIZE);
+        double mark_cache_size_ratio = config->getDouble("mark_cache_size_ratio", DEFAULT_MARK_CACHE_SIZE_RATIO);
+        if (!mark_cache_size)
+            LOG_ERROR(&Poco::Logger::get("CHUtil"), "Too low mark cache size will lead to severe performance degradation.");
+
+        global_context->setMarkCache(mark_cache_policy, mark_cache_size, mark_cache_size_ratio);
+
+        String index_uncompressed_cache_policy
+            = config->getString("index_uncompressed_cache_policy", DEFAULT_INDEX_UNCOMPRESSED_CACHE_POLICY);
+        size_t index_uncompressed_cache_size
+            = config->getUInt64("index_uncompressed_cache_size", DEFAULT_INDEX_UNCOMPRESSED_CACHE_MAX_SIZE);
+        double index_uncompressed_cache_size_ratio
+            = config->getDouble("index_uncompressed_cache_size_ratio", DEFAULT_INDEX_UNCOMPRESSED_CACHE_SIZE_RATIO);
+        global_context->setIndexUncompressedCache(
+            index_uncompressed_cache_policy, index_uncompressed_cache_size, index_uncompressed_cache_size_ratio);
+
+        String index_mark_cache_policy = config->getString("index_mark_cache_policy", DEFAULT_INDEX_MARK_CACHE_POLICY);
+        size_t index_mark_cache_size = config->getUInt64("index_mark_cache_size", DEFAULT_INDEX_MARK_CACHE_MAX_SIZE);
+        double index_mark_cache_size_ratio = config->getDouble("index_mark_cache_size_ratio", DEFAULT_INDEX_MARK_CACHE_SIZE_RATIO);
+        global_context->setIndexMarkCache(index_mark_cache_policy, index_mark_cache_size, index_mark_cache_size_ratio);
+
+        size_t mmap_cache_size = config->getUInt64("mmap_cache_size", DEFAULT_MMAP_CACHE_MAX_SIZE);
+        global_context->setMMappedFileCache(mmap_cache_size);
+
+        /// Initialize a dummy query cache.
+        global_context->setQueryCache(0, 0, 0, 0);
+
+        // We must set the application type to CLIENT to avoid ServerUUID::get() throw exception
+        global_context->setApplicationType(Context::ApplicationType::CLIENT);
+    }
+    else
+    {
+        // just for ut
+        global_context->updateStorageConfiguration(*config);
     }
 }
 
-void BackendInitializerUtil::applyConfigAndSettings()
+void BackendInitializerUtil::applyGlobalConfigAndSettings(const DB::Context::ConfigurationPtr & config, const DB::Settings & settings)
 {
-    auto & global_context = SerializedPlanParser::global_context;
+    const auto global_context = QueryContext::globalMutableContext();
     global_context->setConfig(config);
     global_context->setSettings(settings);
 }
 
 extern void registerAggregateFunctionCombinatorPartialMerge(AggregateFunctionCombinatorFactory &);
+extern void registerAggregateFunctionsBloomFilter(AggregateFunctionFactory &);
+extern void registerAggregateFunctionSparkAvg(AggregateFunctionFactory &);
 extern void registerFunctions(FunctionFactory &);
 
 void registerAllFunctions()
 {
     DB::registerFunctions();
-    DB::registerAggregateFunctions();
 
+    DB::registerAggregateFunctions();
+    auto & agg_factory = AggregateFunctionFactory::instance();
+    registerAggregateFunctionsBloomFilter(agg_factory);
+    registerAggregateFunctionSparkAvg(agg_factory);
     {
         /// register aggregate function combinators from local_engine
         auto & factory = AggregateFunctionCombinatorFactory::instance();
@@ -642,8 +894,16 @@ void registerAllFunctions()
     }
 }
 
+void registerGlutenDisks()
+{
+    registerDisks(true);
+    registerGlutenDisks(true);
+}
+
 void BackendInitializerUtil::registerAllFactories()
 {
+    registerGlutenDisks();
+
     registerReadBufferBuilders();
     registerWriteBufferBuilders();
 
@@ -656,7 +916,7 @@ void BackendInitializerUtil::registerAllFactories()
     LOG_INFO(logger, "Register all functions.");
 }
 
-void BackendInitializerUtil::initCompiledExpressionCache()
+void BackendInitializerUtil::initCompiledExpressionCache(DB::Context::ConfigurationPtr config)
 {
 #if USE_EMBEDDED_COMPILER
     /// 128 MB
@@ -671,31 +931,45 @@ void BackendInitializerUtil::initCompiledExpressionCache()
 #endif
 }
 
-void BackendInitializerUtil::init(std::string * plan)
+void BackendInitializerUtil::initBackend(const std::map<std::string, std::string> & spark_conf_map)
 {
-    initConfig(plan);
-    initLoggers();
+    DB::Context::ConfigurationPtr config = initConfig(spark_conf_map);
 
-    initEnvs();
+    initLoggers(config);
+
+    initEnvs(config);
     LOG_INFO(logger, "Init environment variables.");
 
-    initSettings();
+    DB::Settings settings;
+    initSettings(spark_conf_map, settings);
     LOG_INFO(logger, "Init settings.");
 
-    initContexts();
+    initContexts(config);
     LOG_INFO(logger, "Init shared context and global context.");
 
-    applyConfigAndSettings();
+    applyGlobalConfigAndSettings(config, settings);
     LOG_INFO(logger, "Apply configuration and setting for global context.");
+
+    // clean static per_bucket_clients and shared_client before running local engine,
+    // in case of running the multiple gluten ut in one process
+    ReadBufferBuilderFactory::instance().clean();
+
+    // Init the table metadata cache map
+    StorageMergeTreeFactory::init_cache_map();
+
+    JobScheduler::initialize(QueryContext::globalContext());
+    CacheManager::initialize(QueryContext::globalMutableContext());
 
     std::call_once(
         init_flag,
         [&]
         {
+            SignalHandler::instance().init();
+
             registerAllFactories();
             LOG_INFO(logger, "Register all factories.");
 
-            initCompiledExpressionCache();
+            initCompiledExpressionCache(config);
             LOG_INFO(logger, "Init compiled expressions cache factory.");
 
             GlobalThreadPool::initialize();
@@ -705,26 +979,122 @@ void BackendInitializerUtil::init(std::string * plan)
                 active_parts_loading_threads,
                 0, // We don't need any threads one all the parts will be loaded
                 active_parts_loading_threads);
+
+            const size_t cleanup_threads = config->getUInt("max_parts_cleaning_thread_pool_size", 128);
+            getPartsCleaningThreadPool().initialize(
+                cleanup_threads,
+                0, // We don't need any threads one all the parts will be deleted
+                cleanup_threads);
+
+            // Avoid using LD_PRELOAD in child process
+            unsetenv("LD_PRELOAD");
         });
 }
 
 void BackendFinalizerUtil::finalizeGlobally()
 {
-
-
-    auto & global_context = SerializedPlanParser::global_context;
-    auto & shared_context = SerializedPlanParser::shared_context;
-    if (global_context)
-    {
-        global_context->shutdown();
-        global_context.reset();
-        shared_context.reset();
-    }
+    // Make sure client caches release before ClientCacheRegistry
+    ReadBufferBuilderFactory::instance().clean();
+    StorageMergeTreeFactory::clear();
+    QueryContext::resetGlobal();
+    std::lock_guard lock(paths_mutex);
+    std::ranges::for_each(
+        paths_need_to_clean,
+        [](const auto & path)
+        {
+            if (fs::exists(path))
+                fs::remove_all(path);
+        });
+    paths_need_to_clean.clear();
 }
 
 void BackendFinalizerUtil::finalizeSessionally()
 {
+}
 
+std::vector<String> BackendFinalizerUtil::paths_need_to_clean;
+
+std::mutex BackendFinalizerUtil::paths_mutex;
+
+Int64 DateTimeUtil::currentTimeMillis()
+{
+    return timeInMilliseconds(std::chrono::system_clock::now());
+}
+
+String DateTimeUtil::convertTimeZone(const String & time_zone)
+{
+    String res = time_zone;
+    /// Convert timezone ID like '+08:00' to GMT+8:00
+    if (time_zone.starts_with("+") || time_zone.starts_with("-"))
+        res = "GMT" + time_zone;
+    res = DateLUT::mappingForJavaTimezone(res);
+    return res;
+}
+
+UInt64 MemoryUtil::getMemoryRSS()
+{
+    long rss = 0L;
+    FILE * fp = NULL;
+    char buf[4096];
+    sprintf(buf, "/proc/%d/statm", getpid());
+    if ((fp = fopen(buf, "r")) == NULL)
+        return 0;
+    fscanf(fp, "%*s%ld", &rss);
+    fclose(fp);
+    return rss * sysconf(_SC_PAGESIZE);
+}
+
+
+void JoinUtil::reorderJoinOutput(DB::QueryPlan & plan, DB::Names cols)
+{
+    ActionsDAG project{plan.getCurrentHeader().getNamesAndTypesList()};
+    NamesWithAliases project_cols;
+    for (const auto & col : cols)
+    {
+        project_cols.emplace_back(NameWithAlias(col, col));
+    }
+    project.project(project_cols);
+    QueryPlanStepPtr project_step = std::make_unique<ExpressionStep>(plan.getCurrentHeader(), std::move(project));
+    project_step->setStepDescription("Reorder Join Output");
+    plan.addStep(std::move(project_step));
+}
+
+std::pair<DB::JoinKind, DB::JoinStrictness>
+JoinUtil::getJoinKindAndStrictness(substrait::JoinRel_JoinType join_type, bool is_existence_join)
+{
+    switch (join_type)
+    {
+        case substrait::JoinRel_JoinType_JOIN_TYPE_INNER:
+            return {DB::JoinKind::Inner, DB::JoinStrictness::All};
+        case substrait::JoinRel_JoinType_JOIN_TYPE_LEFT_SEMI: {
+            if (is_existence_join)
+                return {DB::JoinKind::Left, DB::JoinStrictness::Any};
+            return {DB::JoinKind::Left, DB::JoinStrictness::Semi};
+        }
+        case substrait::JoinRel_JoinType_JOIN_TYPE_LEFT_ANTI:
+            return {DB::JoinKind::Left, DB::JoinStrictness::Anti};
+        case substrait::JoinRel_JoinType_JOIN_TYPE_LEFT:
+            return {DB::JoinKind::Left, DB::JoinStrictness::All};
+        case substrait::JoinRel_JoinType_JOIN_TYPE_RIGHT:
+            return {DB::JoinKind::Right, DB::JoinStrictness::All};
+        case substrait::JoinRel_JoinType_JOIN_TYPE_OUTER:
+            return {DB::JoinKind::Full, DB::JoinStrictness::All};
+        default:
+            throw Exception(ErrorCodes::UNKNOWN_TYPE, "unsupported join type {}.", magic_enum::enum_name(join_type));
+    }
+}
+
+std::pair<DB::JoinKind, DB::JoinStrictness> JoinUtil::getCrossJoinKindAndStrictness(substrait::CrossRel_JoinType join_type)
+{
+    switch (join_type)
+    {
+        case substrait::CrossRel_JoinType_JOIN_TYPE_INNER:
+        case substrait::CrossRel_JoinType_JOIN_TYPE_LEFT:
+        case substrait::CrossRel_JoinType_JOIN_TYPE_OUTER:
+            return {DB::JoinKind::Cross, DB::JoinStrictness::All};
+        default:
+            throw Exception(ErrorCodes::UNKNOWN_TYPE, "unsupported join type {}.", magic_enum::enum_name(join_type));
+    }
 }
 
 }

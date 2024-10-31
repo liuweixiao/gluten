@@ -16,11 +16,12 @@
  */
 package org.apache.spark.sql.execution.datasources.v2.clickhouse.source
 
-import org.apache.spark.sql.delta.DeltaParquetFileFormat
+import org.apache.spark.sql.delta.{DeltaParquetFileFormat, MergeTreeFileFormat}
 import org.apache.spark.sql.delta.actions.Metadata
 
-class DeltaMergeTreeFileFormat(metadata: Metadata)
-  extends DeltaParquetFileFormat(metadata.columnMappingMode, metadata.schema) {
+class DeltaMergeTreeFileFormat(val metadata: Metadata)
+  extends DeltaParquetFileFormat(metadata.columnMappingMode, metadata.schema)
+  with MergeTreeFileFormat {
 
   override def equals(other: Any): Boolean = {
     other match {

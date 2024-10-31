@@ -14,10 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql.catalyst.expressions
 
-import org.apache.spark.sql.GlutenTestConstants.GLUTEN_TEST
 import org.apache.spark.sql.GlutenTestsTrait
 import org.apache.spark.sql.types._
 
@@ -40,7 +38,7 @@ class GlutenCastSuite extends CastSuite with GlutenTestsTrait {
   UDTRegistration.register(classOf[IExampleBaseType].getName, classOf[ExampleBaseTypeUDT].getName)
   UDTRegistration.register(classOf[IExampleSubType].getName, classOf[ExampleSubTypeUDT].getName)
 
-  test(GLUTEN_TEST + "missing cases - from boolean") {
+  testGluten("missing cases - from boolean") {
     (DataTypeTestUtils.numericTypeWithoutDecimal + BooleanType).foreach {
       t =>
         t match {
@@ -55,7 +53,7 @@ class GlutenCastSuite extends CastSuite with GlutenTestsTrait {
     }
   }
 
-  test(GLUTEN_TEST + "missing cases - from byte") {
+  testGluten("missing cases - from byte") {
     DataTypeTestUtils.numericTypeWithoutDecimal.foreach {
       t =>
         checkEvaluation(cast(cast(0, ByteType), t), 0)
@@ -64,7 +62,7 @@ class GlutenCastSuite extends CastSuite with GlutenTestsTrait {
     }
   }
 
-  test(GLUTEN_TEST + "missing cases - from short") {
+  testGluten("missing cases - from short") {
     DataTypeTestUtils.numericTypeWithoutDecimal.foreach {
       t =>
         checkEvaluation(cast(cast(0, ShortType), t), 0)
@@ -73,7 +71,7 @@ class GlutenCastSuite extends CastSuite with GlutenTestsTrait {
     }
   }
 
-  test("missing cases - date self check") {
+  testGluten("missing cases - date self check") {
     val d = Date.valueOf("1970-01-01")
     checkEvaluation(cast(d, DateType), d)
   }

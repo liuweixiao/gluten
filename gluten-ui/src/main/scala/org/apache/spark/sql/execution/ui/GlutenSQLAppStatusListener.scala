@@ -16,24 +16,24 @@
  */
 package org.apache.spark.sql.execution.ui
 
-import io.glutenproject.events.{GlutenBuildInfoEvent, GlutenPlanFallbackEvent}
+import org.apache.gluten.events.{GlutenBuildInfoEvent, GlutenPlanFallbackEvent}
+
+import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.internal.Logging
-import org.apache.spark.scheduler._
-import org.apache.spark.sql.internal.StaticSQLConf._
+import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent}
+import org.apache.spark.sql.internal.StaticSQLConf.UI_RETAINED_EXECUTIONS
 import org.apache.spark.status.{ElementTrackingStore, KVUtils}
-import org.apache.spark.SparkConf
 
 import scala.collection.mutable
 
-class GlutenSQLAppStatusListener(
-    conf: SparkConf,
-    kvstore: ElementTrackingStore) extends SparkListener with Logging {
-
+private class GlutenSQLAppStatusListener(conf: SparkConf, kvstore: ElementTrackingStore)
+  extends SparkListener
+  with Logging {
   private val executionIdToDescription = new mutable.HashMap[Long, String]
   private val executionIdToFallbackEvent = new mutable.HashMap[Long, GlutenPlanFallbackEvent]
 
-  kvstore.addTrigger(classOf[SQLExecutionUIData], conf.get[Int](UI_RETAINED_EXECUTIONS)) { count =>
-    cleanupExecutions(count)
+  kvstore.addTrigger(classOf[SQLExecutionUIData], conf.get[Int](UI_RETAINED_EXECUTIONS)) {
+    count => cleanupExecutions(count)
   }
 
   private def onGlutenBuildInfo(event: GlutenBuildInfoEvent): Unit = {
@@ -50,7 +50,8 @@ class GlutenSQLAppStatusListener(
         event.numGlutenNodes,
         event.numFallbackNodes,
         event.physicalPlanDescription,
-        event.fallbackNodeToReason.toSeq.sortBy(_._1))
+        event.fallbackNodeToReason.toSeq.sortBy(_._1)
+      )
       kvstore.write(uiData)
     } else {
       // the first stage applies rule before post `SparkListenerSQLExecutionStart`,
@@ -68,21 +69,22 @@ class GlutenSQLAppStatusListener(
         fallbackEvent.get.numGlutenNodes,
         fallbackEvent.get.numFallbackNodes,
         fallbackEvent.get.physicalPlanDescription,
-        fallbackEvent.get.fallbackNodeToReason.toSeq.sortBy(_._1))
+        fallbackEvent.get.fallbackNodeToReason.toSeq.sortBy(_._1)
+      )
       kvstore.write(uiData)
       executionIdToFallbackEvent.remove(event.executionId)
     }
     executionIdToDescription.put(event.executionId, event.description)
   }
 
-  private def onSQLExtensionEnd(event: SparkListenerSQLExecutionEnd): Unit = {
+  private def onSQLExecutionEnd(event: SparkListenerSQLExecutionEnd): Unit = {
     executionIdToDescription.remove(event.executionId)
     executionIdToFallbackEvent.remove(event.executionId)
   }
 
   override def onOtherEvent(event: SparkListenerEvent): Unit = event match {
     case e: SparkListenerSQLExecutionStart => onSQLExecutionStart(e)
-    case e: SparkListenerSQLExecutionEnd => onSQLExtensionEnd(e)
+    case e: SparkListenerSQLExecutionEnd => onSQLExecutionEnd(e)
     case e: GlutenBuildInfoEvent => onGlutenBuildInfo(e)
     case e: GlutenPlanFallbackEvent => onGlutenPlanFallback(e)
     case _ => // Ignore
@@ -96,8 +98,14 @@ class GlutenSQLAppStatusListener(
 
     val view = kvstore.view(classOf[GlutenSQLExecutionUIData]).first(0L)
     val toDelete = KVUtils.viewToSeq(view, countToDelete.toInt)(_ => true)
-    toDelete.foreach { e =>
-      kvstore.delete(e.getClass(), e.executionId)
-    }
+    toDelete.foreach(e => kvstore.delete(e.getClass, e.executionId))
+  }
+}
+
+object GlutenSQLAppStatusListener {
+  def register(sc: SparkContext): Unit = {
+    val kvStore = sc.statusStore.store.asInstanceOf[ElementTrackingStore]
+    val listener = new GlutenSQLAppStatusListener(sc.conf, kvStore)
+    sc.listenerBus.addToStatusQueue(listener)
   }
 }

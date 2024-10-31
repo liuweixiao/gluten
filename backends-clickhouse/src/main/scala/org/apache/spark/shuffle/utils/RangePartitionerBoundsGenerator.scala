@@ -16,13 +16,13 @@
  */
 package org.apache.spark.shuffle.utils
 
-import io.glutenproject.backendsapi.BackendsApiManager
-import io.glutenproject.execution.SortExecTransformer
-import io.glutenproject.expression.ExpressionConverter
-import io.glutenproject.substrait.SubstraitContext
-import io.glutenproject.substrait.expression.ExpressionNode
-import io.glutenproject.substrait.plan.{PlanBuilder, PlanNode}
-import io.glutenproject.substrait.rel.{RelBuilder, RelNode}
+import org.apache.gluten.backendsapi.BackendsApiManager
+import org.apache.gluten.execution.SortExecTransformer
+import org.apache.gluten.expression.ExpressionConverter
+import org.apache.gluten.substrait.SubstraitContext
+import org.apache.gluten.substrait.expression.ExpressionNode
+import org.apache.gluten.substrait.plan.{PlanBuilder, PlanNode}
+import org.apache.gluten.substrait.rel.{RelBuilder, RelNode}
 
 import org.apache.spark.RangePartitioner
 import org.apache.spark.rdd.{PartitionPruningRDD, RDD}
@@ -166,11 +166,7 @@ class RangePartitionerBoundsGenerator[K: Ordering: ClassTag, V](
         node.put("column_ref", index)
         node.put("data_type", ordering.dataType.toString)
         node.put("is_nullable", ordering.nullable)
-        node.put(
-          "direction",
-          SortExecTransformer.transformSortDirection(
-            ordering.direction.sql,
-            ordering.nullOrdering.sql))
+        node.put("direction", SortExecTransformer.transformSortDirection(ordering))
         arrayNode.add(node)
     }
   }
@@ -199,8 +195,12 @@ class RangePartitionerBoundsGenerator[K: Ordering: ClassTag, V](
             case _: FloatType => node.put("value", row.getFloat(i))
             case _: DoubleType => node.put("value", row.getDouble(i))
             case _: StringType => node.put("value", row.getString(i))
-            case _: DateType => node.put("value", row.getShort(i))
-            case d =>
+            case _: DateType => node.put("value", row.getInt(i))
+            case d: DecimalType =>
+              val decimal = row.getDecimal(i, d.precision, d.scale).toString()
+              node.put("value", decimal)
+            case _: TimestampType => node.put("value", row.getLong(i))
+            case _ =>
               throw new IllegalArgumentException(
                 s"Unsupported data type ${ordering.dataType.toString}")
           }
@@ -244,6 +244,8 @@ object RangePartitionerBoundsGenerator {
       case _: DoubleType => true
       case _: StringType => true
       case _: DateType => true
+      case _: DecimalType => true
+      case _: TimestampType => true
       case _ => false
     }
   }

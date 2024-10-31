@@ -19,23 +19,39 @@
 #include "shuffle/FallbackRangePartitioner.h"
 
 namespace gluten {
+
 arrow::Status gluten::FallbackRangePartitioner::compute(
     const int32_t* pidArr,
     const int64_t numRows,
-    std::vector<uint16_t>& partitionId,
-    std::vector<uint32_t>& partitionIdCnt) {
-  partitionId.resize(numRows);
-  std::fill(std::begin(partitionIdCnt), std::end(partitionIdCnt), 0);
+    std::vector<uint32_t>& row2Partition) {
+  row2Partition.resize(numRows);
   for (auto i = 0; i < numRows; ++i) {
     auto pid = pidArr[i];
     if (pid >= numPartitions_) {
       return arrow::Status::Invalid(
           "Partition id ", std::to_string(pid), " is equal or greater than ", std::to_string(numPartitions_));
     }
-    partitionId[i] = pid;
-    partitionIdCnt[pid]++;
+    row2Partition[i] = pid;
   }
   return arrow::Status::OK();
 }
 
+arrow::Status gluten::FallbackRangePartitioner::compute(
+    const int32_t* pidArr,
+    const int64_t numRows,
+    const int32_t vectorIndex,
+    std::unordered_map<int32_t, std::vector<int64_t>>& rowVectorIndexMap) {
+  auto index = static_cast<int64_t>(vectorIndex) << 32;
+  for (auto i = 0; i < numRows; ++i) {
+    auto pid = pidArr[i];
+    int64_t combined = index | (i & 0xFFFFFFFFLL);
+    auto& vec = rowVectorIndexMap[pid];
+    vec.push_back(combined);
+    if (pid >= numPartitions_) {
+      return arrow::Status::Invalid(
+          "Partition id ", std::to_string(pid), " is equal or greater than ", std::to_string(numPartitions_));
+    }
+  }
+  return arrow::Status::OK();
+}
 } // namespace gluten

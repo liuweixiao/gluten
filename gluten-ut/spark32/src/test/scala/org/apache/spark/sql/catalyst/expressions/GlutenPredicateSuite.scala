@@ -14,11 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql.catalyst.expressions
 
+import org.apache.spark.sql.GlutenTestsTrait
 import org.apache.spark.sql.types.IntegerType
-import org.apache.spark.sql.{GlutenTestConstants, GlutenTestsTrait}
 
 class GlutenPredicateSuite extends PredicateSuite with GlutenTestsTrait {
 
@@ -26,10 +25,11 @@ class GlutenPredicateSuite extends PredicateSuite with GlutenTestsTrait {
   private val rightValues = Seq(null, 2, null, 3, 6).map(Literal(_))
   private val expected = Seq(false, false, true, true, false)
 
-  test(GlutenTestConstants.GLUTEN_TEST + "EqualNullSafe") {
+  testGluten("EqualNullSafe") {
     for (i <- leftValues.indices) {
-      checkEvaluation(EqualNullSafe(
-        Cast(leftValues(i), IntegerType), Cast(rightValues(i), IntegerType)), expected(i))
+      checkEvaluation(
+        EqualNullSafe(Cast(leftValues(i), IntegerType), Cast(rightValues(i), IntegerType)),
+        expected(i))
     }
   }
 }

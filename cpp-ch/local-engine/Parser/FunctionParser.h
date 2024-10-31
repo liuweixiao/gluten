@@ -1,10 +1,28 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #pragma once
 
 #include <Core/Field.h>
 #include <DataTypes/IDataType.h>
 #include <Functions/FunctionFactory.h>
 #include <Interpreters/ActionsDAG.h>
+#include <Parser/ParserContext.h>
 #include <Parser/SerializedPlanParser.h>
+#include <Parser/ExpressionParser.h>
 #include <base/types.h>
 #include <boost/noncopyable.hpp>
 #include <substrait/algebra.pb.h>
@@ -13,69 +31,13 @@
 namespace local_engine
 {
 class SerializedPlanParser;
+class ExpressionParser;
 
 /// Parse a single substrait scalar function
 class FunctionParser
 {
 public:
-    /// Manage scalar, aggregate and window functions by FunctionParser.
-    /// Usally we need to make pre-projections and a post-projection for functions.
-
-    /// CommonFunctionInfo is commmon representation for different function types, 
-    struct CommonFunctionInfo
-    {
-        /// basic common function informations
-        using Arguments = google::protobuf::RepeatedPtrField<substrait::FunctionArgument>;
-        using SortFields = google::protobuf::RepeatedPtrField<substrait::SortField>;
-        DB::Int32 function_ref;
-        Arguments arguments;
-        substrait::Type output_type;
-    
-        /// Following is for aggregate and window functions.
-        substrait::AggregationPhase phase;
-        SortFields sort_fields;
-        // only be used in aggregate functions at present.
-        substrait::Expression filter;
-        bool is_in_window = false;
-        bool is_aggregate_function = false;
-        bool has_filter = false;
-
-        CommonFunctionInfo()
-        {
-            function_ref = -1;
-        }
-
-        CommonFunctionInfo(const substrait::Expression_ScalarFunction & substrait_func)
-            : function_ref(substrait_func.function_reference())
-            , arguments(substrait_func.arguments())
-            , output_type(substrait_func.output_type())
-        {
-        }
-
-        CommonFunctionInfo(const substrait::WindowRel::Measure & win_measure)
-            : function_ref(win_measure.measure().function_reference())
-            , arguments(win_measure.measure().arguments())
-            , output_type(win_measure.measure().output_type())
-            , phase(win_measure.measure().phase())
-            , sort_fields(win_measure.measure().sorts())
-        {
-            is_in_window = true;
-            is_aggregate_function = true;
-        }
-
-        CommonFunctionInfo(const substrait::AggregateRel::Measure & agg_measure)
-            : function_ref(agg_measure.measure().function_reference())
-            , arguments(agg_measure.measure().arguments())
-            , output_type(agg_measure.measure().output_type())
-            , phase(agg_measure.measure().phase())
-            , sort_fields(agg_measure.measure().sorts())
-            , filter(agg_measure.filter())
-        {
-            has_filter = agg_measure.has_filter();
-            is_aggregate_function = true;
-        }
-    };
-    explicit FunctionParser(SerializedPlanParser * plan_parser_) : plan_parser(plan_parser_) { }
+    explicit FunctionParser(ParserContextPtr ctx);
 
     virtual ~FunctionParser() = default;
 
@@ -86,96 +48,55 @@ public:
     /// - add const columns for literal arguments into actions_dag.
     /// - make pre-projections for input arguments. e.g. type conversion.
     /// - make a post-projection for the function result. e.g. type conversion.
-    virtual const DB::ActionsDAG::Node * parse(
-        const substrait::Expression_ScalarFunction & substrait_func,
-        DB::ActionsDAGPtr & actions_dag) const;
-    /// We recomment to implement this in the subclass instead of the previous one.
-    /// The previous one is mainly for backward compatibility.
-    virtual const DB::ActionsDAG::Node * parse(
-        const CommonFunctionInfo & func_info,
-        DB::ActionsDAGPtr & actions_dag) const;
+    virtual const DB::ActionsDAG::Node *
+    parse(const substrait::Expression_ScalarFunction & substrait_func, DB::ActionsDAG & actions_dag) const;
 
-    /// In some special cases, different arguments size or different arguments types may refer to different
-    /// CH function implementation.
-    virtual String getCHFunctionName(const CommonFunctionInfo & func_info) const;
-    /// In most cases, arguments size and types are enough to determine the CH function implementation.
-    /// This is only be used in SerializedPlanParser::parseNameStructure.
-    virtual String getCHFunctionName(const DB::DataTypes & args) const;
-
-    /// Do some preprojections for the function arguments, and return the necessary arguments for the CH function.
-    virtual DB::ActionsDAG::NodeRawConstPtrs parseFunctionArguments(
-        const CommonFunctionInfo & func_info,
-        const String & ch_func_name,
-        DB::ActionsDAGPtr & actions_dag) const;
-    DB::ActionsDAG::NodeRawConstPtrs parseFunctionArguments(
-        const CommonFunctionInfo & func_info,
-        DB::ActionsDAGPtr & actions_dag) const;
-
-    /// Make a postprojection for the function result.
-    virtual const DB::ActionsDAG::Node * convertNodeTypeIfNeeded(
-        const CommonFunctionInfo & func_info,
-        const DB::ActionsDAG::Node * func_node,
-        DB::ActionsDAGPtr & actions_dag) const;
-
-    /// Parameters are only used in aggregate functions at present. e.g. percentiles(0.5)(x).
-    /// 0.5 is the parameter of percentiles function.
-    virtual DB::Array parseFunctionParameters(const CommonFunctionInfo & /*func_info*/) const
-    {
-        return DB::Array();
-    }
-    /// Return the default parameters of the function. It's useful for creating a default function instance.
-    virtual DB::Array getDefaultFunctionParameters() const
-    {
-        return DB::Array();
-    }
-
-protected:
     virtual String getCHFunctionName(const substrait::Expression_ScalarFunction & substrait_func) const;
 
+protected:
+    /// Deprecated method
     virtual DB::ActionsDAG::NodeRawConstPtrs parseFunctionArguments(
-        const substrait::Expression_ScalarFunction & substrait_func,
-        const String & ch_func_name,
-        DB::ActionsDAGPtr & actions_dag) const;
+        const substrait::Expression_ScalarFunction & substrait_func, const String & /*function_name*/, DB::ActionsDAG & actions_dag) const
+    {
+        return parseFunctionArguments(substrait_func, actions_dag);
+    }
+    virtual DB::ActionsDAG::NodeRawConstPtrs
+    parseFunctionArguments(const substrait::Expression_ScalarFunction & substrait_func, DB::ActionsDAG & actions_dag) const;
 
     virtual const DB::ActionsDAG::Node * convertNodeTypeIfNeeded(
         const substrait::Expression_ScalarFunction & substrait_func,
         const DB::ActionsDAG::Node * func_node,
-        DB::ActionsDAGPtr & actions_dag) const;
+        DB::ActionsDAG & actions_dag) const;
 
-    DB::ContextPtr getContext() const { return plan_parser->context; }
+    DB::ContextPtr getContext() const { return parser_context->queryContext(); }
 
-    String getUniqueName(const String & name) const { return plan_parser->getUniqueName(name); }
-
-    const DB::ActionsDAG::Node * addColumnToActionsDAG(DB::ActionsDAGPtr & actions_dag, const DB::DataTypePtr & type, const DB::Field & field) const
-    {
-        return &actions_dag->addColumn(ColumnWithTypeAndName(type->createColumnConst(1, field), type, getUniqueName(toString(field))));
-    }
+    String getUniqueName(const String & name) const;
 
     const DB::ActionsDAG::Node *
-    toFunctionNode(DB::ActionsDAGPtr & action_dag, const String & func_name, const DB::ActionsDAG::NodeRawConstPtrs & args) const
-    {
-        return plan_parser->toFunctionNode(action_dag, func_name, args);
-    }
-    
+    addColumnToActionsDAG(DB::ActionsDAG & actions_dag, const DB::DataTypePtr & type, const DB::Field & field) const;
+
     const DB::ActionsDAG::Node *
-    toFunctionNode(DB::ActionsDAGPtr & action_dag, const String & func_name, const String & result_name, const DB::ActionsDAG::NodeRawConstPtrs & args) const
-    {
-        auto function_builder = DB::FunctionFactory::instance().get(func_name, getContext());
-        return &action_dag->addFunction(function_builder, args, result_name);
-    }
+    toFunctionNode(DB::ActionsDAG & action_dag, const String & func_name, const DB::ActionsDAG::NodeRawConstPtrs & args) const;
 
-    const DB::ActionsDAG::Node * parseExpression(DB::ActionsDAGPtr actions_dag, const substrait::Expression & rel) const
-    {
-        return plan_parser->parseExpression(actions_dag, rel);
-    }
+    const DB::ActionsDAG::Node * toFunctionNode(
+        DB::ActionsDAG & action_dag,
+        const String & func_name,
+        const String & result_name,
+        const DB::ActionsDAG::NodeRawConstPtrs & args) const;
 
-    std::pair<DataTypePtr, Field> parseLiteral(const substrait::Expression_Literal & literal) const { return plan_parser->parseLiteral(literal); }
+    const ActionsDAG::Node * parseFunctionWithDAG(
+        const substrait::Expression & rel, std::string & result_name, DB::ActionsDAG & actions_dag, bool keep_result = false) const;
 
-    SerializedPlanParser * plan_parser;
+    const DB::ActionsDAG::Node * parseExpression(DB::ActionsDAG & actions_dag, const substrait::Expression & rel) const;
+
+    std::pair<DataTypePtr, Field> parseLiteral(const substrait::Expression_Literal & literal) const;
+
+    ParserContextPtr parser_context;
+    std::unique_ptr<ExpressionParser> expression_parser;
 };
 
 using FunctionParserPtr = std::shared_ptr<FunctionParser>;
-using FunctionParserCreator = std::function<FunctionParserPtr(SerializedPlanParser *)>;
+using FunctionParserCreator = std::function<FunctionParserPtr(ParserContextPtr)>;
 
 /// Creates FunctionParser by name.
 class FunctionParserFactory : private boost::noncopyable, public DB::IFactoryWithAliases<FunctionParserCreator>
@@ -193,17 +114,15 @@ public:
     void registerFunctionParser()
     {
         // std::cout << "register function parser with name:" << Parser::name << std::endl;
-        auto creator
-            = [](SerializedPlanParser * plan_parser) -> std::shared_ptr<FunctionParser> { return std::make_shared<Parser>(plan_parser); };
+        auto creator = [](ParserContextPtr ctx) -> std::shared_ptr<FunctionParser> { return std::make_shared<Parser>(ctx); };
         registerFunctionParser(Parser::name, creator);
     }
 
-    FunctionParserPtr get(const String & name, SerializedPlanParser * plan_parser);
-    FunctionParserPtr tryGet(const String & name, SerializedPlanParser * plan_parser);
-    const Parsers & getMap() const override {return parsers;}
+    FunctionParserPtr get(const String & name, ParserContextPtr ctx);
+    FunctionParserPtr tryGet(const String & name, ParserContextPtr ctx);
+    const Parsers & getMap() const override { return parsers; }
 
 private:
-
     Parsers parsers;
 
     /// Always empty

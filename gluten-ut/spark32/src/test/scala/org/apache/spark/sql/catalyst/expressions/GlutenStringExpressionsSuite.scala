@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql.catalyst.expressions
 
 import org.apache.spark.sql.GlutenTestsTrait
@@ -22,15 +21,14 @@ import org.apache.spark.sql.GlutenTestsTrait
 class GlutenStringExpressionsSuite extends StringExpressionsSuite with GlutenTestsTrait {
 
   // Ported from spark 3.3.1, applicable to spark 3.2.3 or higher.
-  test("SPARK-40213: ascii for Latin-1 Supplement characters") {
+  testGluten("SPARK-40213: ascii for Latin-1 Supplement characters") {
     // scalastyle:off
     checkEvaluation(Ascii(Literal("¥")), 165, create_row("¥"))
     checkEvaluation(Ascii(Literal("®")), 174, create_row("®"))
     checkEvaluation(Ascii(Literal("©")), 169, create_row("©"))
     // scalastyle:on
-    (128 until 256).foreach { c =>
-      checkEvaluation(Ascii(Chr(Literal(c.toLong))), c, create_row(c.toLong))
+    (128 until 256).foreach {
+      c => checkEvaluation(Ascii(Chr(Literal(c.toLong))), c, create_row(c.toLong))
     }
   }
-
 }

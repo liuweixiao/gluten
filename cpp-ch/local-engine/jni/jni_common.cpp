@@ -1,3 +1,19 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include <exception>
 #include <stdexcept>
 #include <string>
@@ -57,13 +73,13 @@ jmethodID GetStaticMethodID(JNIEnv * env, jclass this_class, const char * name, 
 
 jstring charTojstring(JNIEnv * env, const char * pat)
 {
-    jclass str_class = (env)->FindClass("Ljava/lang/String;");
-    jmethodID ctor_id = (env)->GetMethodID(str_class, "<init>", "([BLjava/lang/String;)V");
-    jsize strSize = static_cast<jsize>(strlen(pat));
-    jbyteArray bytes = (env)->NewByteArray(strSize);
-    (env)->SetByteArrayRegion(bytes, 0, strSize, reinterpret_cast<jbyte *>(const_cast<char *>(pat)));
-    jstring encoding = (env)->NewStringUTF("UTF-8");
-    jstring result = static_cast<jstring>((env)->NewObject(str_class, ctor_id, bytes, encoding));
+    const jclass str_class = (env)->FindClass("Ljava/lang/String;");
+    const jmethodID ctor_id = (env)->GetMethodID(str_class, "<init>", "([BLjava/lang/String;)V");
+    const jsize str_size = static_cast<jsize>(strlen(pat));
+    const jbyteArray bytes = (env)->NewByteArray(str_size);
+    (env)->SetByteArrayRegion(bytes, 0, str_size, reinterpret_cast<jbyte *>(const_cast<char *>(pat)));
+    const jstring encoding = (env)->NewStringUTF("UTF-8");
+    const auto result = static_cast<jstring>((env)->NewObject(str_class, ctor_id, bytes, encoding));
     env->DeleteLocalRef(bytes);
     env->DeleteLocalRef(encoding);
     return result;

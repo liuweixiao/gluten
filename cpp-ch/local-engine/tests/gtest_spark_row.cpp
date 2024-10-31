@@ -1,3 +1,19 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeDate.h>
 #include <DataTypes/DataTypeDate32.h>
@@ -120,7 +136,7 @@ TEST(SparkRow, GetArrayElementSize)
         {std::make_shared<DataTypeUInt32>(), 4},
         {std::make_shared<DataTypeFloat32>(), 4},
         {std::make_shared<DataTypeDate32>(), 4},
-        {std::make_shared<DataTypeDecimal32>(9, 4), 4},
+        {std::make_shared<DataTypeDecimal32>(9, 4), 8},
         {std::make_shared<DataTypeInt64>(), 8},
         {std::make_shared<DataTypeUInt64>(), 8},
         {std::make_shared<DataTypeFloat64>(), 8},
@@ -136,11 +152,11 @@ TEST(SparkRow, GetArrayElementSize)
 
     for (const auto & [type, size] : type_to_size)
     {
-        EXPECT_TRUE(BackingDataLengthCalculator::getArrayElementSize(type) == size);
+        EXPECT_EQ(size, BackingDataLengthCalculator::getArrayElementSize(type));
         if (type->canBeInsideNullable())
         {
             const auto type_with_nullable = std::make_shared<DataTypeNullable>(type);
-            EXPECT_TRUE(BackingDataLengthCalculator::getArrayElementSize(type_with_nullable) == size);
+            EXPECT_EQ(size, BackingDataLengthCalculator::getArrayElementSize(type_with_nullable));
         }
     }
 }
@@ -245,14 +261,6 @@ TEST(SparkRow, StructTypes)
              return std::move(t);
          }()},
     };
-
-    /*
-    for (size_t i=0; i<type_and_fields.size(); ++i)
-    {
-        std::cerr << "i:" << i << ",field:" << type_and_fields[i].type->getName() << ",field:" << toString(type_and_fields[i].field)
-                  << std::endl;
-    }
-    */
 
     SparkRowInfoPtr spark_row_info;
     BlockPtr block;

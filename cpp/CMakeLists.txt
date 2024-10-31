@@ -1,30 +1,31 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+#    http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 cmake_minimum_required(VERSION 3.16)
 message(STATUS "Building using CMake version: ${CMAKE_VERSION}")
 
-# The set(CACHE) command does not remove any normal variable of the same name from the current scope
-# https://cmake.org/cmake/help/latest/policy/CMP0126.html
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# The set(CACHE) command does not remove any normal variable of the same name
+# from the current scope https://cmake.org/cmake/help/latest/policy/CMP0126.html
 if(POLICY CMP0126)
   cmake_policy(SET CMP0126 NEW)
 endif()
 
-if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
   cmake_policy(SET CMP0135 NEW)
 endif()
 
@@ -35,66 +36,113 @@ if(NOT DEFINED CMAKE_BUILD_TYPE)
 endif()
 
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake" ${CMAKE_MODULE_PATH})
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
+set(CMAKE_EXPORT_COMPILE_COMMANDS
+    ON
+    CACHE INTERNAL "")
 
 project(gluten)
 
 option(BUILD_VELOX_BACKEND "Build Velox backend" ON)
 option(BUILD_TESTS "Build Tests" OFF)
+option(BUILD_EXAMPLES "Build Examples" OFF)
 option(BUILD_BENCHMARKS "Build Benchmarks" OFF)
-option(BUILD_PROTOBUF "Build Protobuf from Source" OFF)
-option(BUILD_JEMALLOC "Build Jemalloc from Source" OFF)
+option(ENABLE_JEMALLOC_STATS "Prints Jemalloc stats for debugging" OFF)
+option(BUILD_GLOG "Build Glog from Source" OFF)
 option(USE_AVX512 "Build with AVX-512 optimizations" OFF)
 option(ENABLE_HBM "Enable HBM allocator" OFF)
 option(ENABLE_QAT "Enable QAT for de/compression" OFF)
 option(ENABLE_IAA "Enable IAA for de/compression" OFF)
+option(ENABLE_GCS "Enable GCS" OFF)
 option(ENABLE_S3 "Enable S3" OFF)
 option(ENABLE_HDFS "Enable HDFS" OFF)
+option(ENABLE_ORC "Enable ORC" OFF)
+option(ENABLE_ABFS "Enable ABFS" OFF)
 
 set(root_directory ${PROJECT_BINARY_DIR})
 get_filename_component(GLUTEN_HOME ${CMAKE_SOURCE_DIR} DIRECTORY)
 
-if (NOT DEFINED ARROW_HOME)
-  set(ARROW_HOME ${GLUTEN_HOME}/ep/build-arrow/build)
+if(NOT DEFINED VELOX_HOME)
+  set(VELOX_HOME ${GLUTEN_HOME}/ep/build-velox/build/velox_ep)
+  message(STATUS "Set VELOX_HOME to ${VELOX_HOME}")
 endif()
+
+if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
+  set(ARROW_HOME
+      ${VELOX_HOME}/_build/debug/CMake/resolve_dependency_modules/arrow/arrow_ep/
+  )
+else()
+  set(ARROW_HOME
+      ${VELOX_HOME}/_build/release/CMake/resolve_dependency_modules/arrow/arrow_ep
+  )
+endif()
+
+include(ResolveDependency)
 
 #
 # Compiler flags
 #
 
-if (${CMAKE_BUILD_TYPE} STREQUAL "RelWithDebInfo")
-# keep this original logic
-  add_definitions(-DGLUTEN_PRINT_DEBUG)
-  message(STATUS "Add definition GLUTEN_PRINT_DEBUG")
-elseif (${CMAKE_BUILD_TYPE} STREQUAL "Debug")
-  add_definitions(-DGLUTEN_PRINT_DEBUG)
-  message(STATUS "Add definition GLUTEN_PRINT_DEBUG")
+if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -ggdb -O0")
   message(STATUS "CMAKE_CXX_FLAGS_DEBUG=${CMAKE_CXX_FLAGS_DEBUG}")
-else ()
+else()
   add_definitions(-DNDEBUG)
   message(STATUS "Add definition NDEBUG")
 endif()
 
-add_compile_options(-Wall)
-add_compile_options(-Wno-sign-compare)
-add_compile_options(-Wno-comment)
-
-add_compile_options(-Werror)
-add_compile_options(-Wno-error=parentheses)
-add_compile_options(-Wno-error=unused-function)
-add_compile_options(-Wno-error=unused-variable)
+set(KNOWN_WARNINGS
+    "-Wall \
+       -Wno-sign-compare \
+       -Wno-comment \
+       -Werror \
+       -Wno-error=parentheses \
+       -Wno-error=unused-function \
+       -Wno-error=unused-variable \
+       -Wno-strict-aliasing \
+       -Wno-ignored-qualifiers")
 
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
-  add_compile_options(-Wno-error=unused-but-set-variable)
-elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
+  set(KNOWN_WARNINGS "-Wno-error=unused-but-set-variable \
+      ${KNOWN_WARNINGS}")
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11)
+    set(KNOWN_WARNINGS "-Wno-error=maybe-uninitialized \
+      ${KNOWN_WARNINGS}")
+  endif()
+elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
   # Experimental
-  add_compile_options(-Wno-implicit-int-float-conversion)
-  add_compile_options(-Wno-nullability-completeness)
-  add_compile_options(-Wno-mismatched-tags)
+  set(KNOWN_WARNINGS
+      "-Wno-implicit-int-float-conversion \
+      -Wno-nullability-completeness \
+      -Wno-mismatched-tags \
+      ${KNOWN_WARNINGS}")
+elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "AppleClang")
+  # Experimental
+  set(KNOWN_WARNINGS
+      "-Wno-implicit-int-float-conversion \
+      -Wno-nullability-completeness \
+      -Wno-mismatched-tags \
+      -Wno-error=unused-private-field \
+      -Wno-error=pessimizing-move \
+      ${KNOWN_WARNINGS}")
 else()
-  message("Unsupported compiler ID: ${CMAKE_CXX_COMPILER_ID}")
+  message(FATAL_ERROR "Unsupported compiler ID: ${CMAKE_CXX_COMPILER_ID}")
 endif()
+
+# see https://issues.apache.org/jira/browse/ARROW-4665
+if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+  set(KNOWN_WARNINGS
+      "-Wno-macro-redefined \
+      -Wno-nullability-completeness \
+      -Wno-pessimizing-move \
+      -Wno-mismatched-tags \
+      ${KNOWN_WARNINGS}")
+  # Specific definition for an issue with boost/stacktrace when building on
+  # macOS. See https://github.com/boostorg/stacktrace/issues/88 and comments
+  # therein.
+  add_compile_definitions(_GNU_SOURCE)
+endif()
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${KNOWN_WARNINGS}")
 
 #
 # Dependencies
@@ -107,6 +155,8 @@ find_package(Threads REQUIRED)
 
 find_package(JNI REQUIRED)
 
+find_package(glog REQUIRED)
+
 if(BUILD_TESTS)
   set(GLUTEN_GTEST_MIN_VERSION "1.13.0")
   find_package(GTest ${GLUTEN_GTEST_MIN_VERSION} CONFIG)
@@ -115,23 +165,16 @@ if(BUILD_TESTS)
   endif()
   include(GoogleTest)
   enable_testing()
-  find_package(glog REQUIRED)
 endif()
 
 function(ADD_TEST_CASE TEST_NAME)
   set(options)
   set(one_value_args)
-  set(multi_value_args
-      SOURCES
-      EXTRA_LINK_LIBS
-      EXTRA_INCLUDES
-      EXTRA_DEPENDENCIES)
+  set(multi_value_args SOURCES EXTRA_LINK_LIBS EXTRA_INCLUDES
+                       EXTRA_DEPENDENCIES)
 
-  cmake_parse_arguments(ARG
-      "${options}"
-      "${one_value_args}"
-      "${multi_value_args}"
-      ${ARGN})
+  cmake_parse_arguments(ARG "${options}" "${one_value_args}"
+                        "${multi_value_args}" ${ARGN})
 
   if(ARG_SOURCES)
     set(SOURCES ${ARG_SOURCES})
@@ -140,7 +183,8 @@ function(ADD_TEST_CASE TEST_NAME)
   endif()
 
   add_executable(${TEST_NAME} ${SOURCES})
-  target_link_libraries(${TEST_NAME} gluten GTest::gtest GTest::gtest_main Threads::Threads)
+  target_link_libraries(${TEST_NAME} gluten google::glog GTest::gtest
+                        GTest::gtest_main Threads::Threads)
   target_include_directories(${TEST_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/core)
 
   if(ARG_EXTRA_LINK_LIBS)
@@ -158,7 +202,7 @@ function(ADD_TEST_CASE TEST_NAME)
   gtest_discover_tests(${TEST_NAME})
 endfunction()
 
-if(BUILD_BENCHMARKS)
+if(BUILD_TESTS OR BUILD_BENCHMARKS)
   set(GLUTEN_GBENCHMARKS_MIN_VERSION "1.6.0")
   find_package(benchmark ${GLUTEN_GBENCHMARK_MIN_VERSION} CONFIG)
   if(NOT benchmark_FOUND)
@@ -172,6 +216,10 @@ endif()
 
 if(ENABLE_IAA)
   add_definitions(-DGLUTEN_ENABLE_IAA)
+endif()
+
+if(ENABLE_ORC)
+  add_definitions(-DGLUTEN_ENABLE_ORC)
 endif()
 
 #

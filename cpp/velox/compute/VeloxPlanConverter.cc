@@ -18,170 +18,114 @@
 #include "VeloxPlanConverter.h"
 #include <filesystem>
 
-#include "arrow/c/bridge.h"
 #include "compute/ResultIterator.h"
 #include "config/GlutenConfig.h"
+#include "iceberg/IcebergPlanConverter.h"
 #include "operators/plannodes/RowVectorStream.h"
 #include "velox/common/file/FileSystems.h"
 
-using namespace facebook;
-
 namespace gluten {
 
-void VeloxPlanConverter::setInputPlanNode(const ::substrait::FetchRel& fetchRel) {
-  if (fetchRel.has_input()) {
-    setInputPlanNode(fetchRel.input());
-  } else {
-    throw std::runtime_error("Child expected");
-  }
+using namespace facebook;
+
+VeloxPlanConverter::VeloxPlanConverter(
+    const std::vector<std::shared_ptr<ResultIterator>>& inputIters,
+    velox::memory::MemoryPool* veloxPool,
+    const std::unordered_map<std::string, std::string>& confMap,
+    const std::optional<std::string> writeFilesTempPath,
+    bool validationMode)
+    : validationMode_(validationMode),
+      substraitVeloxPlanConverter_(veloxPool, confMap, writeFilesTempPath, validationMode) {
+  substraitVeloxPlanConverter_.setInputIters(std::move(inputIters));
 }
 
-void VeloxPlanConverter::setInputPlanNode(const ::substrait::ExpandRel& sexpand) {
-  if (sexpand.has_input()) {
-    setInputPlanNode(sexpand.input());
-  } else {
-    throw std::runtime_error("Child expected");
+namespace {
+std::shared_ptr<SplitInfo> parseScanSplitInfo(
+    const google::protobuf::RepeatedPtrField<substrait::ReadRel_LocalFiles_FileOrFiles>& fileList) {
+  using SubstraitFileFormatCase = ::substrait::ReadRel_LocalFiles_FileOrFiles::FileFormatCase;
+
+  auto splitInfo = std::make_shared<SplitInfo>();
+  splitInfo->paths.reserve(fileList.size());
+  splitInfo->starts.reserve(fileList.size());
+  splitInfo->lengths.reserve(fileList.size());
+  splitInfo->partitionColumns.reserve(fileList.size());
+  splitInfo->properties.reserve(fileList.size());
+  splitInfo->metadataColumns.reserve(fileList.size());
+  for (const auto& file : fileList) {
+    // Expect all Partitions share the same index.
+    splitInfo->partitionIndex = file.partition_index();
+
+    std::unordered_map<std::string, std::string> partitionColumnMap;
+    for (const auto& partitionColumn : file.partition_columns()) {
+      partitionColumnMap[partitionColumn.key()] = partitionColumn.value();
+    }
+    splitInfo->partitionColumns.emplace_back(partitionColumnMap);
+
+    std::unordered_map<std::string, std::string> metadataColumnMap;
+    for (const auto& metadataColumn : file.metadata_columns()) {
+      metadataColumnMap[metadataColumn.key()] = metadataColumn.value();
+    }
+    splitInfo->metadataColumns.emplace_back(metadataColumnMap);
+
+    splitInfo->paths.emplace_back(file.uri_file());
+    splitInfo->starts.emplace_back(file.start());
+    splitInfo->lengths.emplace_back(file.length());
+
+    facebook::velox::FileProperties fileProps;
+    if (file.has_properties()) {
+      fileProps.fileSize = file.properties().filesize();
+      fileProps.modificationTime = file.properties().modificationtime();
+    }
+    splitInfo->properties.emplace_back(fileProps);
+    switch (file.file_format_case()) {
+      case SubstraitFileFormatCase::kOrc:
+        splitInfo->format = dwio::common::FileFormat::ORC;
+        break;
+      case SubstraitFileFormatCase::kDwrf:
+        splitInfo->format = dwio::common::FileFormat::DWRF;
+        break;
+      case SubstraitFileFormatCase::kParquet:
+        splitInfo->format = dwio::common::FileFormat::PARQUET;
+        break;
+      case SubstraitFileFormatCase::kText:
+        splitInfo->format = dwio::common::FileFormat::TEXT;
+        break;
+      case SubstraitFileFormatCase::kIceberg:
+        splitInfo = IcebergPlanConverter::parseIcebergSplitInfo(file, std::move(splitInfo));
+        break;
+      default:
+        splitInfo->format = dwio::common::FileFormat::UNKNOWN;
+        break;
+    }
   }
+  return splitInfo;
 }
 
-void VeloxPlanConverter::setInputPlanNode(const ::substrait::SortRel& ssort) {
-  if (ssort.has_input()) {
-    setInputPlanNode(ssort.input());
-  } else {
-    throw std::runtime_error("Child expected");
+void parseLocalFileNodes(
+    SubstraitToVeloxPlanConverter* planConverter,
+    std::vector<::substrait::ReadRel_LocalFiles>& localFiles) {
+  std::vector<std::shared_ptr<SplitInfo>> splitInfos;
+  splitInfos.reserve(localFiles.size());
+  for (int32_t i = 0; i < localFiles.size(); i++) {
+    const auto& localFile = localFiles[i];
+    const auto& fileList = localFile.items();
+
+    splitInfos.push_back(parseScanSplitInfo(fileList));
   }
+
+  planConverter->setSplitInfos(std::move(splitInfos));
 }
-
-void VeloxPlanConverter::setInputPlanNode(const ::substrait::WindowRel& swindow) {
-  if (swindow.has_input()) {
-    setInputPlanNode(swindow.input());
-  } else {
-    throw std::runtime_error("Child expected");
-  }
-}
-
-void VeloxPlanConverter::setInputPlanNode(const ::substrait::AggregateRel& sagg) {
-  if (sagg.has_input()) {
-    setInputPlanNode(sagg.input());
-  } else {
-    throw std::runtime_error("Child expected");
-  }
-}
-
-void VeloxPlanConverter::setInputPlanNode(const ::substrait::ProjectRel& sproject) {
-  if (sproject.has_input()) {
-    setInputPlanNode(sproject.input());
-  } else {
-    throw std::runtime_error("Child expected");
-  }
-}
-
-void VeloxPlanConverter::setInputPlanNode(const ::substrait::FilterRel& sfilter) {
-  if (sfilter.has_input()) {
-    setInputPlanNode(sfilter.input());
-  } else {
-    throw std::runtime_error("Child expected");
-  }
-}
-
-void VeloxPlanConverter::setInputPlanNode(const ::substrait::JoinRel& sjoin) {
-  if (sjoin.has_left()) {
-    setInputPlanNode(sjoin.left());
-  } else {
-    throw std::runtime_error("Left child expected");
-  }
-
-  if (sjoin.has_right()) {
-    setInputPlanNode(sjoin.right());
-  } else {
-    throw std::runtime_error("Right child expected");
-  }
-}
-
-void VeloxPlanConverter::setInputPlanNode(const ::substrait::ReadRel& sread) {
-  int32_t iterIdx = subVeloxPlanConverter_->streamIsInput(sread);
-  if (iterIdx == -1) {
-    return;
-  }
-  if (inputIters_.size() == 0) {
-    throw std::runtime_error("Invalid input iterator.");
-  }
-  // Get the input schema of this iterator.
-  uint64_t colNum = 0;
-  std::vector<std::shared_ptr<velox::substrait::SubstraitParser::SubstraitType>> subTypeList;
-  if (sread.has_base_schema()) {
-    const auto& baseSchema = sread.base_schema();
-    // Input names is not used. Instead, new input/output names will be created
-    // because the ValueStreamNode in Velox does not support name change.
-    colNum = baseSchema.names().size();
-    subTypeList = subParser_->parseNamedStruct(baseSchema);
-  }
-
-  std::vector<std::string> outNames;
-  outNames.reserve(colNum);
-  for (int idx = 0; idx < colNum; idx++) {
-    auto colName = subParser_->makeNodeName(planNodeId_, idx);
-    outNames.emplace_back(colName);
-  }
-
-  std::vector<velox::TypePtr> veloxTypeList;
-  for (auto subType : subTypeList) {
-    veloxTypeList.push_back(velox::substrait::toVeloxType(subType->type));
-  }
-  auto outputType = ROW(std::move(outNames), std::move(veloxTypeList));
-  auto vectorStream = std::make_shared<RowVectorStream>(std::move(inputIters_[iterIdx]), outputType);
-  auto valuesNode = std::make_shared<ValueStreamNode>(nextPlanNodeId(), outputType, std::move(vectorStream));
-  subVeloxPlanConverter_->insertInputNode(iterIdx, valuesNode, planNodeId_);
-}
-
-void VeloxPlanConverter::setInputPlanNode(const ::substrait::Rel& srel) {
-  if (srel.has_aggregate()) {
-    setInputPlanNode(srel.aggregate());
-  } else if (srel.has_project()) {
-    setInputPlanNode(srel.project());
-  } else if (srel.has_filter()) {
-    setInputPlanNode(srel.filter());
-  } else if (srel.has_read()) {
-    setInputPlanNode(srel.read());
-  } else if (srel.has_join()) {
-    setInputPlanNode(srel.join());
-  } else if (srel.has_sort()) {
-    setInputPlanNode(srel.sort());
-  } else if (srel.has_expand()) {
-    setInputPlanNode(srel.expand());
-  } else if (srel.has_fetch()) {
-    setInputPlanNode(srel.fetch());
-  } else if (srel.has_window()) {
-    setInputPlanNode(srel.window());
-  } else {
-    throw std::runtime_error("Rel is not supported: " + srel.DebugString());
-  }
-}
-
-void VeloxPlanConverter::setInputPlanNode(const ::substrait::RelRoot& sroot) {
-  // Output names can be got from RelRoot, but are not used currently.
-  if (sroot.has_input()) {
-    setInputPlanNode(sroot.input());
-  } else {
-    throw std::runtime_error("Input is expected in RelRoot.");
-  }
-}
+} // namespace
 
 std::shared_ptr<const facebook::velox::core::PlanNode> VeloxPlanConverter::toVeloxPlan(
-    ::substrait::Plan& substraitPlan) {
-  // In fact, only one RelRoot is expected here.
-  for (auto& srel : substraitPlan.relations()) {
-    if (srel.has_root()) {
-      setInputPlanNode(srel.root());
-    }
-    if (srel.has_rel()) {
-      setInputPlanNode(srel.rel());
-    }
+    const ::substrait::Plan& substraitPlan,
+    std::vector<::substrait::ReadRel_LocalFiles> localFiles) {
+  if (!validationMode_) {
+    parseLocalFileNodes(&substraitVeloxPlanConverter_, localFiles);
   }
-  auto veloxPlan = subVeloxPlanConverter_->toVeloxPlan(substraitPlan);
-#ifdef GLUTEN_PRINT_DEBUG
-  std::cout << "Plan Node: " << std::endl << veloxPlan->toString(true, true) << std::endl;
-#endif
+
+  auto veloxPlan = substraitVeloxPlanConverter_.toVeloxPlan(substraitPlan);
+  DLOG(INFO) << "Plan Node: " << std::endl << veloxPlan->toString(true, true);
   return veloxPlan;
 }
 

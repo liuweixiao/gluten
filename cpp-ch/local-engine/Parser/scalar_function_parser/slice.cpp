@@ -1,7 +1,24 @@
-#include <Parser/FunctionParser.h>
-#include <Common/CHUtil.h>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include <Core/Field.h>
 #include <DataTypes/IDataType.h>
+#include <Parser/FunctionParser.h>
+#include <Common/BlockTypeUtils.h>
+#include <Common/CHUtil.h>
 
 namespace DB
 {
@@ -18,7 +35,7 @@ namespace local_engine
 class FunctionParserArraySlice : public FunctionParser
 {
 public:
-    explicit FunctionParserArraySlice(SerializedPlanParser * plan_parser_) : FunctionParser(plan_parser_) { }
+    explicit FunctionParserArraySlice(ParserContextPtr parser_context_) : FunctionParser(parser_context_) { }
 
     static constexpr auto name = "slice";
 
@@ -26,7 +43,7 @@ public:
 
     const ActionsDAG::Node * parse(
         const substrait::Expression_ScalarFunction & substrait_func,
-        ActionsDAGPtr & actions_dag) const override
+        ActionsDAG & actions_dag) const override
     {
         /**
             parse slice(arr, start, length) as
@@ -44,7 +61,7 @@ public:
             2. Spark slice returns null if any of the argument is null
         */
 
-        auto parsed_args = parseFunctionArguments(substrait_func, "", actions_dag);
+        auto parsed_args = parseFunctionArguments(substrait_func, actions_dag);
         if (parsed_args.size() != 3)
             throw Exception(ErrorCodes::BAD_ARGUMENTS, "Function {} requires exactly three arguments", getName());
 
@@ -72,30 +89,22 @@ public:
         DataTypePtr wrap_arr_nullable_type = wrapNullableType(true, slice_node->result_type);
 
         const auto * wrap_slice_node = ActionsDAGUtil::convertNodeType(
-            actions_dag, slice_node, wrap_arr_nullable_type->getName(), slice_node->result_name);
+            actions_dag, slice_node, wrap_arr_nullable_type, slice_node->result_name);
         const auto * null_const_node = addColumnToActionsDAG(actions_dag, wrap_arr_nullable_type, Field{});
 
         const auto * arr_is_null_node = toFunctionNode(actions_dag, "isNull", {arr_arg});
         const auto * start_is_null_node = toFunctionNode(actions_dag, "isNull", {start_arg});
         const auto * length_is_null_node = toFunctionNode(actions_dag, "isNull", {length_arg});
+        const auto * or_condition_node = toFunctionNode(actions_dag, "or", {arr_is_null_node, start_is_null_node, length_is_null_node});
 
-        const auto * multi_if_ndoe = toFunctionNode(actions_dag, "multiIf", {
-            arr_is_null_node,
-            null_const_node,
-            start_is_null_node,
-            null_const_node,
-            length_is_null_node,
-            null_const_node,
-            wrap_slice_node
-        });
-
-        return multi_if_ndoe;
+        const auto * if_node = toFunctionNode(actions_dag, "if", {or_condition_node, null_const_node, wrap_slice_node });
+        return convertNodeTypeIfNeeded(substrait_func, if_node, actions_dag);
     }
 
 private:
     // if (start=0) then throwIf(start=0) else start
     const ActionsDAG::Node * makeStartIfNode(
-        ActionsDAGPtr & actions_dag,
+        ActionsDAG & actions_dag,
         const ActionsDAG::Node * start_arg,
         const ActionsDAG::Node * zero_const_node) const
     {
@@ -107,7 +116,7 @@ private:
 
      // if (length<0) then throwIf(length<0) else length
     const ActionsDAG::Node * makeLengthIfNode(
-        ActionsDAGPtr & actions_dag,
+        ActionsDAG & actions_dag,
         const ActionsDAG::Node * length_arg,
         const ActionsDAG::Node * zero_const_node) const
     {

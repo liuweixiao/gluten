@@ -15,54 +15,82 @@
  * limitations under the License.
  */
 
-#include "ShuffleWriter.h"
-
-#include <arrow/result.h>
-
-#include "ShuffleSchema.h"
+#include "shuffle/ShuffleWriter.h"
+#include "utils/Exception.h"
 
 namespace gluten {
 
-#ifndef SPLIT_BUFFER_SIZE
-// by default, allocate 8M block, 2M page size
-#define SPLIT_BUFFER_SIZE 16 * 1024 * 1024
-#endif
+namespace {
+const std::string kHashShuffleName = "hash";
+const std::string kSortShuffleName = "sort";
+const std::string kRssSortShuffleName = "rss_sort";
+} // namespace
 
-ShuffleWriterOptions ShuffleWriterOptions::defaults() {
-  return {};
-}
-
-arrow::Status ShuffleBufferPool::allocate(std::shared_ptr<arrow::Buffer>& buffer, uint32_t size) {
-  // if size is already larger than buffer pool size, allocate it directly
-  // make size 64byte aligned
-  auto reminder = size & 0x3f;
-  size += (64 - reminder) & ((reminder == 0) - 1);
-  if (size > SPLIT_BUFFER_SIZE) {
-    ARROW_ASSIGN_OR_RAISE(buffer, arrow::AllocateResizableBuffer(size, pool_.get()));
-    return arrow::Status::OK();
-  } else if (combineBuffer_->capacity() - combineBuffer_->size() < size) {
-    // memory pool is not enough
-    ARROW_ASSIGN_OR_RAISE(combineBuffer_, arrow::AllocateResizableBuffer(SPLIT_BUFFER_SIZE, pool_.get()));
-    RETURN_NOT_OK(combineBuffer_->Resize(0, /*shrink_to_fit = */ false));
+ShuffleWriterType ShuffleWriter::stringToType(const std::string& type) {
+  if (type == kHashShuffleName) {
+    return ShuffleWriterType::kHashShuffle;
   }
-  buffer = arrow::SliceMutableBuffer(combineBuffer_, combineBuffer_->size(), size);
-  RETURN_NOT_OK(combineBuffer_->Resize(combineBuffer_->size() + size, /*shrink_to_fit = */ false));
-  return arrow::Status::OK();
-}
-
-arrow::Status ShuffleBufferPool::allocateDirectly(std::shared_ptr<arrow::Buffer>& buffer, uint32_t size) {
-  auto reminder = size & 0x3f;
-  size += (64 - reminder) & ((reminder == 0) - 1);
-  ARROW_ASSIGN_OR_RAISE(buffer, arrow::AllocateResizableBuffer(size, pool_.get()));
-  return arrow::Status::OK();
-}
-
-std::shared_ptr<arrow::Schema> ShuffleWriter::writeSchema() {
-  if (writeSchema_ != nullptr) {
-    return writeSchema_;
+  if (type == kSortShuffleName) {
+    return ShuffleWriterType::kSortShuffle;
   }
-
-  writeSchema_ = toWriteSchema(*schema_);
-  return writeSchema_;
+  if (type == kRssSortShuffleName) {
+    return ShuffleWriterType::kRssSortShuffle;
+  }
+  throw GlutenException("Unrecognized shuffle writer type: " + type);
 }
+
+int32_t ShuffleWriter::numPartitions() const {
+  return numPartitions_;
+}
+
+ShuffleWriterOptions& ShuffleWriter::options() {
+  return options_;
+}
+
+int64_t ShuffleWriter::totalBytesWritten() const {
+  return metrics_.totalBytesWritten;
+}
+
+int64_t ShuffleWriter::totalBytesEvicted() const {
+  return metrics_.totalBytesEvicted;
+}
+
+int64_t ShuffleWriter::totalBytesToEvict() const {
+  return metrics_.totalBytesToEvict;
+}
+
+int64_t ShuffleWriter::totalWriteTime() const {
+  return metrics_.totalWriteTime;
+}
+
+int64_t ShuffleWriter::totalEvictTime() const {
+  return metrics_.totalEvictTime;
+}
+
+int64_t ShuffleWriter::totalCompressTime() const {
+  return metrics_.totalCompressTime;
+}
+
+int64_t ShuffleWriter::peakBytesAllocated() const {
+  return pool_->max_memory();
+}
+
+int64_t ShuffleWriter::totalSortTime() const {
+  return 0;
+}
+
+int64_t ShuffleWriter::totalC2RTime() const {
+  return 0;
+}
+
+const std::vector<int64_t>& ShuffleWriter::partitionLengths() const {
+  return metrics_.partitionLengths;
+}
+
+const std::vector<int64_t>& ShuffleWriter::rawPartitionLengths() const {
+  return metrics_.rawPartitionLengths;
+}
+
+ShuffleWriter::ShuffleWriter(int32_t numPartitions, ShuffleWriterOptions options, arrow::MemoryPool* pool)
+    : numPartitions_(numPartitions), options_(std::move(options)), pool_(pool) {}
 } // namespace gluten

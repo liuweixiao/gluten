@@ -1,8 +1,23 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include <Columns/ColumnConst.h>
 #include <Columns/ColumnString.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeString.h>
-#include <DataTypes/DataTypesNumber.h>
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
 #include <Functions/IFunction.h>
@@ -24,6 +39,7 @@ using namespace DB;
 
 namespace local_engine
 {
+using SparkRegexp = OptimizedRegularExpression;
 namespace
 {
     class FunctionRegexpExtractAllSpark : public IFunction
@@ -54,14 +70,14 @@ namespace
                     arguments.size());
 
             FunctionArgumentDescriptors args{
-                {"haystack", &isString<IDataType>, nullptr, "String"},
-                {"pattern", &isString<IDataType>, isColumnConst, "const String"},
+                {"haystack", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isString), nullptr, "String"},
+                {"pattern", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isString), isColumnConst, "const String"},
             };
 
             if (arguments.size() == 3)
-                args.emplace_back(FunctionArgumentDescriptor{"index", &isInteger<IDataType>, nullptr, "Integer"});
+                args.emplace_back(FunctionArgumentDescriptor{"index", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isInteger), nullptr, "Integer"});
 
-            validateFunctionArgumentTypes(*this, arguments, args);
+            validateFunctionArguments(*this, arguments, args);
 
             return std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>());
         }
@@ -132,7 +148,7 @@ namespace
         static void saveMatchs(
             Pos start,
             Pos end,
-            const Regexps::Regexp & regexp,
+            const SparkRegexp & regexp,
             OptimizedRegularExpression::MatchVec & matches,
             size_t match_index,
             ColumnArray::Offsets & res_offsets,
@@ -153,12 +169,12 @@ namespace
                 const auto & match = matches[match_index];
                 if (match.offset != std::string::npos)
                 {
-                    res_strings_chars.resize(res_strings_offset + match.length + 1);
+                    res_strings_chars.resize_exact(res_strings_offset + match.length + 1);
                     memcpySmallAllowReadWriteOverflow15(&res_strings_chars[res_strings_offset], pos + match.offset, match.length);
                     res_strings_offset += match.length;
                 }
                 else
-                    res_strings_chars.resize(res_strings_offset + 1);
+                    res_strings_chars.resize_exact(res_strings_offset + 1);
 
                 /// Update offsets of Column:String
                 res_strings_chars[res_strings_offset] = 0;
@@ -183,7 +199,7 @@ namespace
             ColumnString::Chars & res_strings_chars,
             ColumnString::Offsets & res_strings_offsets)
         {
-            const Regexps::Regexp regexp = Regexps::createRegexp<false, false, false>(pattern);
+            const SparkRegexp regexp = Regexps::createRegexp<false, false, false>(pattern);
             unsigned capture = regexp.getNumberOfSubpatterns();
             if (index < 0 || index >= capture + 1)
                 throw Exception(
@@ -195,9 +211,9 @@ namespace
             OptimizedRegularExpression::MatchVec matches;
             matches.reserve(index + 1);
 
-            res_offsets.reserve(offsets.size());
-            res_strings_chars.reserve(data.size() / 3);
-            res_strings_offsets.reserve(offsets.size() * 2);
+            res_offsets.reserve_exact(offsets.size());
+            res_strings_chars.reserve_exact(data.size() / 3);
+            res_strings_offsets.reserve_exact(offsets.size() * 2);
 
             size_t res_offset = 0;
             size_t res_strings_offset = 0;
@@ -231,15 +247,15 @@ namespace
             ColumnString::Chars & res_strings_chars,
             ColumnString::Offsets & res_strings_offsets)
         {
-            const Regexps::Regexp regexp = Regexps::createRegexp<false, false, false>(pattern);
+            const SparkRegexp regexp = Regexps::createRegexp<false, false, false>(pattern);
             unsigned capture = regexp.getNumberOfSubpatterns();
 
             OptimizedRegularExpression::MatchVec matches;
             matches.reserve(capture + 1);
 
-            res_offsets.reserve(offsets.size());
-            res_strings_chars.reserve(data.size() / 3);
-            res_strings_offsets.reserve(offsets.size() * 2);
+            res_offsets.reserve_exact(offsets.size());
+            res_strings_chars.reserve_exact(data.size() / 3);
+            res_strings_offsets.reserve_exact(offsets.size() * 2);
 
             size_t res_offset = 0;
             size_t res_strings_offset = 0;
@@ -281,7 +297,7 @@ namespace
             ColumnString::Chars & res_strings_chars,
             ColumnString::Offsets & res_strings_offsets)
         {
-            const Regexps::Regexp regexp = Regexps::createRegexp<false, false, false>(pattern);
+            const SparkRegexp regexp = Regexps::createRegexp<false, false, false>(pattern);
             unsigned capture = regexp.getNumberOfSubpatterns();
 
             /// Copy data into padded array to be able to use memcpySmallAllowReadWriteOverflow15.
@@ -317,9 +333,9 @@ namespace
             }
 
             size_t rows = column_index->size();
-            res_offsets.reserve(rows);
-            res_strings_chars.reserve(rows * str.size() / 3);
-            res_strings_offsets.reserve(rows * 2);
+            res_offsets.reserve_exact(rows);
+            res_strings_chars.reserve_exact(rows * str.size() / 3);
+            res_strings_offsets.reserve_exact(rows * 2);
 
             size_t res_offset = 0;
             size_t res_strings_offset = 0;
@@ -340,12 +356,12 @@ namespace
                     /// Append matched segment into res_strings_chars
                     if (match.offset != std::string::npos)
                     {
-                        res_strings_chars.resize(res_strings_offset + match.length + 1);
+                        res_strings_chars.resize_exact(res_strings_offset + match.length + 1);
                         memcpySmallAllowReadWriteOverflow15(&res_strings_chars[res_strings_offset], start + match.offset, match.length);
                         res_strings_offset += match.length;
                     }
                     else
-                        res_strings_chars.resize(res_strings_offset + 1);
+                        res_strings_chars.resize_exact(res_strings_offset + 1);
 
                     /// Update offsets of Column:String
                     res_strings_chars[res_strings_offset] = 0;

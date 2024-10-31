@@ -6,22 +6,20 @@ parent: Developer Overview
 ---
 Help users to debug and test with gluten.
 
-For intel internal developer, you could refer to internal wiki  [New Employee Guide](https://wiki.ith.intel.com/display/HPDA/New+Employee+Guide) to get more information such as proxy settings,
-Gluten has cpp code and java/scala code, we can use some useful IDE to read and debug.
-
 # Environment
 
-Now gluten supports Ubuntu20.04, Ubuntu22.04, centos8
+Now gluten supports Ubuntu20.04, Ubuntu22.04, centos8, centos7 and macOS.
 
-## Openjdk8
+## OpenJDK 8
 
-### Environment setting
+### Environment Setting
 
-For root user, the environment variables file is `/etc/profile`, it will make effect for all the users.
+For root user, the environment variables file is `/etc/profile`, it will take effect for all the users.
 
 For other user, you can set in `~/.bashrc`.
 
-### Guide for ubuntu
+### Guide for Ubuntu
+
 The default JDK version in ubuntu is java11, we need to set to java8.
 
 ```bash
@@ -43,6 +41,18 @@ export PATH="$PATH:$JAVA_HOME/bin"
 
 > Must set PATH with double quote in ubuntu.
 
+## OpenJDK 17
+
+By default, Gluten compiles package using JDK8. Enable maven profile by `-Pjava-17` to use JDK17 or `-Pjava-11` to use JDK 11, and please make sure your JAVA_HOME points to jdk17 or jdk11 respectively.
+
+Apache Spark and Arrow requires setting java args `-Dio.netty.tryReflectionSetAccessible=true`, see [SPARK-29924](https://issues.apache.org/jira/browse/SPARK-29924) and [ARROW-6206](https://issues.apache.org/jira/browse/ARROW-6206).
+So please add following configs in `spark-defaults.conf`:
+
+```
+spark.driver.extraJavaOptions=-Dio.netty.tryReflectionSetAccessible=true
+spark.executor.extraJavaOptions=-Dio.netty.tryReflectionSetAccessible=true
+```
+
 ## Maven 3.6.3 or above
 
 [Maven Dowload Page](https://maven.apache.org/docs/history.html)
@@ -52,48 +62,34 @@ And then set the environment setting.
 
 # Compile gluten using debug mode
 
-If you just debug java code, you don't need to compile cpp debug mode, just do as [build-gluten-with-velox-backend](../get-started/Velox.md#2-build-gluten-with-velox-backend)
+If you want to just debug java/scala code, there is no need to compile cpp code with debug mode.
+You can just refer to [build-gluten-with-velox-backend](../get-started/Velox.md#build-gluten-with-velox-backend).
 
-If you need to debug cpp code, please compile the backend code and gluten cpp code as debug mode.
+If you need to debug cpp code, please compile the backend code and gluten cpp code with debug mode.
 
 ```bash
-## compile velox
-./build_velox.sh --build_type=Debug
-## compile arrow with tests required library
-./build_arrow.sh --build_tests=ON
-## compile gluten cpp with benchmark and tests to debug
-cmake -DBUILD_VELOX_BACKEND=ON -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON -DCMAKE_BUILD_TYPE=Debug ..
+## compile velox backend with benchmark and tests to debug
+gluten_home/dev/builddeps-veloxbe.sh --build_tests=ON --build_benchmarks=ON --build_type=Debug
 ```
 
 If you need to debug the tests in <gluten>/gluten-ut, You need to compile java code with `-P spark-ut`.
 
-# Debug java/scala with Intellij
+# Java/scala code development with Intellij
 
-## Linux intellij local debug
+## Linux IntelliJ local debug
 
-Install the linux intellij version, and debug code locally.
+Install the Linux IntelliJ version, and debug code locally.
 
 - Ask your linux maintainer to install the desktop, and then restart the server.
 - If you use Moba-XTerm to connect linux server, you don't need to install x11 server, If not (e.g. putty), please follow this guide:
 [X11 Forwarding: Setup Instructions for Linux and Mac](https://www.businessnewsdaily.com/11035-how-to-use-x11-forwarding.html)
 
-- Download [intellij linux community version](https://www.jetbrains.com/idea/download/?fromIDE=#section=linux) to linux server
+- Download [IntelliJ Linux community version](https://www.jetbrains.com/idea/download/?fromIDE=#section=linux) to Linux server
 - Start Idea, `bash <idea_dir>/idea.sh`
 
-Notes: Sometimes, your desktop may stop accidently, left idea running.
+## Windows/macOS IntelliJ remote debug
 
-```bash
-root@xx2:~bash idea-IC-221.5787.30/bin/idea.sh
-Already running
-root@xx2:~ps ux | grep intellij
-root@xx2:kill -9 <pid>
-```
-
-And then restart idea.
-
-## Windows/Mac intellij remote debug
-
-If you have Ultimate intellij, you can try to debug remotely.
+If you have IntelliJ Ultimate Edition, you can debug Gluten code remotely.
 
 ## Set up gluten project
 
@@ -102,7 +98,25 @@ If you have Ultimate intellij, you can try to debug remotely.
 - Activate your profiles such as <backends-velox>, and Reload Maven Project, you will find all your need modules have been activated.
 - Create breakpoint and debug as you wish, maybe you can try `CTRL+N` to find `TestOperator` to start your test.
 
-# Debug cpp code with Visual Studio Code
+## Java/Scala code style
+
+IntelliJ supports importing settings for Java/Scala code style. You can import [intellij-codestyle.xml](../../dev/intellij-codestyle.xml) to your IDE.
+See [IntelliJ guide](https://www.jetbrains.com/help/idea/configuring-code-style.html#import-code-style).
+
+To generate a fix for Java/Scala code style, you can run one or more of the below commands according to the code modules involved in your PR.
+
+For Velox backend:
+```
+mvn spotless:apply -Pbackends-velox -Pceleborn -Puniffle -Pspark-3.2 -Pspark-ut -DskipTests
+mvn spotless:apply -Pbackends-velox -Pceleborn -Puniffle -Pspark-3.3 -Pspark-ut -DskipTests
+```
+For Clickhouse backend:
+```
+mvn spotless:apply -Pbackends-clickhouse -Pspark-3.2 -Pspark-ut -DskipTests
+mvn spotless:apply -Pbackends-clickhouse -Pspark-3.3 -Pspark-ut -DskipTests
+```
+
+# CPP code development with Visual Studio Code
 
 This guide is for remote debug. We will connect the remote linux server by `SSH`.
 Download the [windows vscode software](https://code.visualstudio.com/Download)
@@ -110,10 +124,8 @@ The important leftside bar is:
 - Explorer (Project structure)
 - Search
 - Run and Debug
-- Extensions (Install C/C++ Extension Pack, Remote Develoment, GitLens at least, C++ Test Mate is also suggested)
+- Extensions (Install C/C++ Extension Pack, Remote Development, GitLens at least, C++ Test Mate is also suggested)
 - Remote Explorer (Connect linux server by ssh command, click `+`, then input `ssh user@10.1.7.003`)
--
--
 - Manage (Settings)
 
 Input your password in the above pop-up window, it will take a few minutes to install linux vscode server in remote machine folder `~/.vscode-server`
@@ -136,7 +148,7 @@ VSCode support 2 ways to set user setting.
 
 ### Build by vscode
 
-VSCode will try to compile the debug version in <gluten_home>/build.
+VSCode will try to compile using debug mode in <gluten_home>/build.
 And we need to compile velox debug mode before, if you have compiled velox release mode, you just need to do.
 
 ```bash
@@ -234,14 +246,15 @@ Then you can create breakpoint and debug in `Run and Debug` section.
 
 ### Velox debug
 
-For some velox tests such as `ParquetReaderTest`, tests need to read the parquet file in `<velox_home>/velox/dwio/parquet/tests/examples`, you should let the screen on `ParquetReaderTest.cpp`, then click `Start Debuging`, otherwise you will raise No such file or directory exception
+For some velox tests such as `ParquetReaderTest`, tests need to read the parquet file in `<velox_home>/velox/dwio/parquet/tests/examples`, 
+you should let the screen on `ParquetReaderTest.cpp`, then click `Start Debuging`, otherwise `No such file or directory` exception will be raised.
 
-## Usefule notes
+## Useful notes
 
-### Upgrade vscode
+### Do not upgrade vscode
 
 No need to upgrade vscode version, if upgraded, will download linux server again, switch update mode to off
-Search `update` in Manage->Settings to turn off update mode
+Search `update` in Manage->Settings to turn off update mode.
 
 ### Colour setting
 
@@ -258,23 +271,76 @@ Search `update` in Manage->Settings to turn off update mode
 
 ### Clang format
 
-Now gluten uses clang-format 12 to format source files.
+Now gluten uses clang-format 15 to format source files.
 
 ```bash
-apt-get install clang-format-12
+apt-get install clang-format-15
 ```
 
 Set config in `settings.json`
 
 ```json
-"clang-format.executable": "clang-format-12",
+"clang-format.executable": "clang-format-15",
 "editor.formatOnSave": true,
 ```
 
 If exists multiple clang-format version, formatOnSave may not take effect, specify the default formatter
 Search `default formatter` in `Settings`, select Clang-Format.
 
-If your formatOnSave still make no effect, you can use shortcut `SHIFT+ALT+F` to format one file mannually.
+If your formatOnSave still make no effect, you can use shortcut `SHIFT+ALT+F` to format one file manually.
+
+### CMake format
+
+To format cmake files, like CMakeLists.txt & *.cmake, please install `cmake-format`.
+```
+pip3 install --user cmake-format
+```
+Here is an example to format a file in command line.
+```
+cmake-format --first-comment-is-literal True --in-place cpp/velox/CMakeLists.txt
+```
+
+After the above installation, you can optionally do some configuration in Visual Studio Code to easily format cmake files.
+1. Install `cmake-format` extension in Visual Studio Code.
+2. Configure the extension. To do this, open the settings (File -> Preferences -> Settings), search for `cmake-format`,
+   and do the below settings:
+   * Set Args: `--first-comment-is-literal=True`.
+   * Set Exe Path to the path of the `cmake-format` command. If you installed `cmake-format` in a standard
+      location, you might not need to change this setting.
+3. Now, you can format your CMake files by right-clicking in a file and selecting `Format Document`.
+
+### Add UT
+
+1. For Native Code Modifications: If you have modified native code, it is best to use gtest to test the native code. 
+   A secondary option is to add Gluten UT to ensure coverage.
+
+2. For Gluten-Related Code Modifications: If you have modified code related to Gluten, it is preferable to add scalatest rather than JUnit. 
+   Additionally, the test classes should be placed in the org.apache.gluten package.
+
+3. For Spark-Related Code Modifications: If you have modified code related to Spark, it is preferable to add scalatest rather than JUnit. 
+   Additionally, the test classes should be placed in the org.apache.spark package.
+
+4. Placement of Non-Native Code UTs: Ensure that unit tests for non-native code are placed within org.apache.gluten and org.apache.spark packages. 
+   This is important because the CI system runs unit tests from these two paths in parallel. Placing tests in other paths might cause your tests to be ignored.
+
+### View surefire reports of velox ut in GHA  
+
+Surefire reports are invaluable tools in the ecosystem of Java-based applications that utilize the Maven build automation tool.  
+These reports are generated by the Maven Surefire Plugin during the testing phase of your build process.  
+They compile results from unit tests, providing detailed insights into which tests passed or failed, what errors were encountered, and other essential metrics.  
+
+Surefire reports play a crucial role in the development and maintenance of high-quality software.  
+We provide surefire reports of velox ut in GHA, and developers can leverage surefire reports with early bug detection and quality assurance.  
+
+You can check surefire reports:
+
+1. Click `Checks` Tab in PR;  
+
+2. Find `Report test results` in `Dev PR`;
+
+3. Then, developers can check the result with summary and annotations.  
+
+![](../image/surefire-report.png)  
 
 # Debug cpp code with coredump
 
@@ -344,58 +410,87 @@ wait to attach....
 (gdb) c
 ```
 
+# Debug Memory leak
+
+## Arrow memory allocator leak
+
+If you receive error message like 
+
+```bash
+4/04/18 08:15:38 WARN ArrowBufferAllocators$ArrowBufferAllocatorManager: Detected leaked Arrow allocator [Default], size: 191, process accumulated leaked size: 191...
+24/04/18 08:15:38 WARN ArrowBufferAllocators$ArrowBufferAllocatorManager: Leaked allocator stack Allocator(ROOT) 0/191/319/9223372036854775807 (res/actual/peak/limit)
+```
+You can open the Arrow allocator debug config by add VP option `-Darrow.memory.debug.allocator=true`, then you can get more details like
+
+```bash
+child allocators: 0
+  ledgers: 7
+    ledger[10] allocator: ROOT), isOwning: , size: , references: 1, life: 10483701311283711..0, allocatorManager: [, life: ] holds 1 buffers. 
+        ArrowBuf[11], address:140100698555856, capacity:128
+     event log for: ArrowBuf[11]
+       10483701311362601 create()
+              at org.apache.arrow.memory.util.HistoricalLog$Event.<init>(HistoricalLog.java:175)
+              at org.apache.arrow.memory.util.HistoricalLog.recordEvent(HistoricalLog.java:83)
+              at org.apache.arrow.memory.ArrowBuf.<init>(ArrowBuf.java:97)
+              at org.apache.arrow.memory.BufferLedger.newArrowBuf(BufferLedger.java:271)
+              at org.apache.arrow.memory.BaseAllocator.bufferWithoutReservation(BaseAllocator.java:340)
+              at org.apache.arrow.memory.BaseAllocator.buffer(BaseAllocator.java:316)
+              at org.apache.arrow.memory.RootAllocator.buffer(RootAllocator.java:29)
+              at org.apache.arrow.memory.BaseAllocator.buffer(BaseAllocator.java:280)
+              at org.apache.arrow.memory.RootAllocator.buffer(RootAllocator.java:29)
+              at org.apache.arrow.c.ArrowArray.allocateNew(ArrowArray.java:116)
+              at org.apache.arrow.c.ArrayImporter.importArray(ArrayImporter.java:61)
+              at org.apache.arrow.c.Data.importIntoVector(Data.java:289)
+              at org.apache.arrow.c.Data.importIntoVectorSchemaRoot(Data.java:332)
+              at org.apache.arrow.dataset.jni.NativeScanner$NativeReader.loadNextBatch(NativeScanner.java:151)
+              at org.apache.gluten.datasource.ArrowFileFormat$$anon$1.hasNext(ArrowFileFormat.scala:99)
+              at org.apache.gluten.utils.IteratorCompleter.hasNext(Iterators.scala:69)
+              at org.apache.spark.memory.SparkMemoryUtil$UnsafeItr.hasNext(SparkMemoryUtil.scala:246)
+```
+
+## CPP code memory leak
+
+Sometimes you cannot get the coredump symbols, if you debug memory leak, you can write googletest to use valgrind to detect
+
+```bash
+apt install valgrind
+valgrind --leak-check=yes ./exec_backend_test
+```
+
+
 # Run TPC-H and TPC-DS
 
 We supply `<gluten_home>/tools/gluten-it` to execute these queries
-Refer to [velox_be.yml](https://github.com/oap-project/gluten/blob/main/.github/workflows/velox_be.yml)
+Refer to [velox_be.yml](https://github.com/apache/incubator-gluten/blob/main/.github/workflows/velox_be.yml)
 
 # Run gluten+velox on clean machine
 
-We can run gluten+velox on clean machine by one command.(Support Ubuntu20.04/Ubuntu22.04). gluten will load dynamic link(DLL)
-from gluten-thirdparty-lib-<osversion>.jar when spark.gluten.loadLibFromJar=true.
+We can run gluten + velox on clean machine by one command (supported OS: Ubuntu20.04/22.04, Centos 7/8, etc.).
 ```
 spark-shell --name run_gluten \
  --master yarn --deploy-mode client \
- --conf spark.plugins=io.glutenproject.GlutenPlugin \
+ --conf spark.plugins=org.apache.gluten.GlutenPlugin \
  --conf spark.memory.offHeap.enabled=true \
  --conf spark.memory.offHeap.size=20g \
- --conf spark.gluten.loadLibFromJar=true \
- --jars https://github.com/oap-project/gluten/releases/download/0.5.0/gluten-velox-bundle-spark3.2_2.12-ubuntu_20.04-0.5.0-SNAPSHOT.jar,https://github.com/oap-project/gluten/releases/download/0.5.0/gluten-thirdparty-lib-ubuntu-20.04.jar 
-
+ --jars https://github.com/apache/incubator-gluten/releases/download/v1.1.1/gluten-velox-bundle-spark3.2_2.12-1.1.1.jar \
+ --conf spark.shuffle.manager=org.apache.spark.shuffle.sort.ColumnarShuffleManager
 ```
 
-# How to prioritize loading Gluten jars in Spark 
+# Check Gluten Approved Spark Plan
 
-To implement the Insert into directory function in gluten, it is necessary to overwrite the implementation of HiveFileFormat in vanilla spark. Therefore, when running a program that uses gluten, it is essential to ensure that the gluten jar is loaded prior to the vanilla spark jar. In this section, we will provide some configuration settings in `$SPARK_HOME/conf/spark-defaults.conf` for Yarn client, Yarn cluster, and Local&Standalone mode to guarantee that the gluten jar is prioritized.
+To make sure we don't accidentally modify the Gluten and Spark Plan build logic.
+We introduce new logic in `VeloxTPCHSuite` to check whether the plan has been changed or not,
+and this will be triggered when running the unit test.
 
-## Configurations for Yarn Client mode
-
+As a result, developers may encounter unit test fail in Github CI or locally, with the following error message:
+```log
+- TPC-H q5 *** FAILED ***
+  Mismatch for query 5
+  Actual Plan path: /tmp/tpch-approved-plan/v2-bhj/spark322/5.txt
+  Golden Plan path: /opt/gluten/backends-velox/target/scala-2.12/test-classes/tpch-approved-plan/v2-bhj/spark322/5.txt (VeloxTPCHSuite.scala:101)
 ```
-// spark will upload the gluten jar to hdfs and then the nodemanager will fetch the gluten jar before start the executor process. Here also can set the spark.jars.
-spark.files = {absolute_path}/gluten-<spark-version>-<gluten-version>-SNAPSHOT-jar-with-dependencies.jar
-// The absolute path on running node
-spark.driver.extraClassPath={absolute_path}/gluten-<spark-version>-<gluten-version>-SNAPSHOT-jar-with-dependencies.jar
-// The relative path under the executor working directory
-spark.executor.extraClassPath=./gluten-<spark-version>-<gluten-version>-SNAPSHOT-jar-with-dependencies.jar
-```
+For developers to update the golden plan, you can find the actual plan in Github CI Artifacts or in local `/tmp/` directory. 
 
-## Configurations for Yarn Cluster mode
-```
-spark.driver.userClassPathFirst = true
-spark.executor.userClassPathFirst = true
+![](../image/gluten_golden_file_upload.png)
 
-spark.files = {absolute_path}/gluten-<spark-version>-<gluten-version>-SNAPSHOT-jar-with-dependencies.jar
-// The relative path under the executor working directory
-spark.driver.extraClassPath=./gluten-<spark-version>-<gluten-version>-SNAPSHOT-jar-with-dependencies.jar
-// The relative path under the executor working directory
-spark.executor.extraClassPath=./gluten-<spark-version>-<gluten-version>-SNAPSHOT-jar-with-dependencies.jar
-```
-## Configurations for Local & Standalone mode
-```
-// The absolute path on running node
-spark.driver.extraClassPath={absolute_path}/gluten-<spark-version>-<gluten-version>-SNAPSHOT-jar-with-dependencies.jar
-// The absolute path on running node
-spark.executor.extraClassPath={absolute_path}/gluten-<spark-version>-<gluten-version>-SNAPSHOT-jar-with-dependencies.jar
-```
-
-
+Developers can simply copy the actual plan to the golden plan path, and then re-run the unit test to make sure the plan is stabled.

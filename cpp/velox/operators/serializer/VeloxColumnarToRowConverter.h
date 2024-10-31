@@ -20,7 +20,6 @@
 #include <arrow/memory_pool.h>
 #include <arrow/type.h>
 
-#include "operators/c2r/ArrowColumnarToRowConverter.h"
 #include "operators/c2r/ColumnarToRow.h"
 #include "velox/buffer/Buffer.h"
 #include "velox/row/UnsafeRowFast.h"
@@ -31,19 +30,19 @@ namespace gluten {
 class VeloxColumnarToRowConverter final : public ColumnarToRowConverter {
  public:
   explicit VeloxColumnarToRowConverter(
-      std::shared_ptr<arrow::MemoryPool> arrowPool,
-      std::shared_ptr<facebook::velox::memory::MemoryPool> veloxPool)
-      : ColumnarToRowConverter(arrowPool), veloxPool_(veloxPool) {}
+      std::shared_ptr<facebook::velox::memory::MemoryPool> veloxPool,
+      int64_t memThreshold)
+      : ColumnarToRowConverter(), veloxPool_(veloxPool), memThreshold_(memThreshold) {}
 
-  arrow::Status write(std::shared_ptr<ColumnarBatch> cb) override;
+  void convert(std::shared_ptr<ColumnarBatch> cb, int64_t startRow = 0) override;
 
  private:
-  arrow::Status init();
+  void refreshStates(facebook::velox::RowVectorPtr rowVector, int64_t startRow);
 
-  facebook::velox::RowVectorPtr rv_;
   std::shared_ptr<facebook::velox::memory::MemoryPool> veloxPool_;
   std::shared_ptr<facebook::velox::row::UnsafeRowFast> fast_;
   facebook::velox::BufferPtr veloxBuffers_;
+  int64_t memThreshold_;
 };
 
 } // namespace gluten

@@ -20,9 +20,10 @@
 #include "arrow/c/bridge.h"
 #include "arrow/c/helpers.h"
 #include "arrow/record_batch.h"
+#include "memory/MemoryManager.h"
 #include "operators/writer/ArrowWriter.h"
 #include "utils/ArrowStatus.h"
-#include "utils/exception.h"
+#include "utils/Exception.h"
 
 #include "ColumnarBatch.h"
 
@@ -42,9 +43,20 @@ int64_t ColumnarBatch::getExportNanos() const {
   return exportNanos_;
 }
 
+std::vector<char> ColumnarBatch::toUnsafeRow(int32_t rowId) const {
+  throw gluten::GlutenException("Not implemented toUnsafeRow for ColumnarBatch");
+}
+
 std::ostream& operator<<(std::ostream& os, const ColumnarBatch& columnarBatch) {
   return os << "NumColumns: " << std::to_string(columnarBatch.numColumns())
             << "NumRows: " << std::to_string(columnarBatch.numRows());
+}
+
+std::shared_ptr<ColumnarBatch> createZeroColumnBatch(int32_t numRows) {
+  return std::make_shared<ArrowColumnarBatch>(arrow::RecordBatch::Make(
+      std::make_shared<arrow::Schema>(std::vector<std::shared_ptr<arrow::Field>>()),
+      numRows,
+      std::vector<std::shared_ptr<arrow::Array>>()));
 }
 
 ArrowColumnarBatch::ArrowColumnarBatch(std::shared_ptr<arrow::RecordBatch> batch)
@@ -72,6 +84,10 @@ std::shared_ptr<ArrowArray> ArrowColumnarBatch::exportArrowArray() {
   auto cArray = std::make_shared<ArrowArray>();
   GLUTEN_THROW_NOT_OK(arrow::ExportRecordBatch(*batch_, cArray.get()));
   return cArray;
+}
+
+std::vector<char> ArrowColumnarBatch::toUnsafeRow(int32_t rowId) const {
+  throw gluten::GlutenException("#toUnsafeRow of ArrowColumnarBatch is not implemented");
 }
 
 ArrowCStructColumnarBatch::ArrowCStructColumnarBatch(
@@ -107,81 +123,8 @@ std::shared_ptr<ArrowArray> ArrowCStructColumnarBatch::exportArrowArray() {
   return cArray_;
 }
 
-std::shared_ptr<ColumnarBatch> CompositeColumnarBatch::create(std::vector<std::shared_ptr<ColumnarBatch>> batches) {
-  int32_t numRows = -1;
-  int32_t numColumns = 0;
-  for (const auto& batch : batches) {
-    if (numRows == -1) {
-      numRows = batch->numRows();
-    } else if (batch->numRows() != numRows) {
-      throw GlutenException("Mismatched row counts among the input batches during creating CompositeColumnarBatch");
-    }
-    numColumns += batch->numColumns();
-  }
-  return std::shared_ptr<ColumnarBatch>(new CompositeColumnarBatch(numColumns, numRows, batches));
+std::vector<char> ArrowCStructColumnarBatch::toUnsafeRow(int32_t rowId) const {
+  throw gluten::GlutenException("#toUnsafeRow of ArrowCStructColumnarBatch is not implemented");
 }
 
-std::string CompositeColumnarBatch::getType() const {
-  return "composite";
-}
-
-int64_t CompositeColumnarBatch::numBytes() {
-  int64_t numBytes = 0L;
-  for (const auto& batch : batches_) {
-    numBytes += batch->numBytes();
-  }
-  return numBytes;
-}
-
-std::shared_ptr<ArrowArray> CompositeColumnarBatch::exportArrowArray() {
-  ensureUnderlyingBatchCreated();
-  return compositeBatch_->exportArrowArray();
-}
-
-std::shared_ptr<ArrowSchema> CompositeColumnarBatch::exportArrowSchema() {
-  ensureUnderlyingBatchCreated();
-  return compositeBatch_->exportArrowSchema();
-}
-
-const std::vector<std::shared_ptr<ColumnarBatch>>& CompositeColumnarBatch::getBatches() const {
-  return batches_;
-}
-
-CompositeColumnarBatch::CompositeColumnarBatch(
-    long numColumns,
-    long numRows,
-    std::vector<std::shared_ptr<ColumnarBatch>> batches)
-    : ColumnarBatch(numColumns, numRows) {
-  this->batches_ = std::move(batches);
-}
-
-void CompositeColumnarBatch::ensureUnderlyingBatchCreated() {
-  if (compositeBatch_ != nullptr) {
-    return;
-  }
-  std::vector<std::shared_ptr<arrow::RecordBatch>> arrowBatches;
-  for (const auto& batch : batches_) {
-    auto cSchema = batch->exportArrowSchema();
-    auto cArray = batch->exportArrowArray();
-    auto arrowBatch = gluten::arrowGetOrThrow(arrow::ImportRecordBatch(cArray.get(), cSchema.get()));
-    arrowBatches.push_back(std::move(arrowBatch));
-  }
-
-  std::vector<std::shared_ptr<arrow::Field>> fields;
-  std::vector<std::shared_ptr<arrow::ArrayData>> arrays;
-
-  for (const auto& batch : arrowBatches) {
-    if (batch->schema()->metadata() != nullptr) {
-      throw gluten::GlutenException("Schema metadata not allowed");
-    }
-    for (const auto& field : batch->schema()->fields()) {
-      fields.push_back(field);
-    }
-    for (const auto& col : batch->column_data()) {
-      arrays.push_back(col);
-    }
-  }
-  compositeBatch_ = std::make_shared<ArrowColumnarBatch>(
-      arrow::RecordBatch::Make(std::make_shared<arrow::Schema>(fields), numRows(), arrays));
-}
 } // namespace gluten

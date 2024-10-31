@@ -16,11 +16,11 @@
  */
 package org.apache.spark.sql.execution.benchmarks
 
-import io.glutenproject.GlutenConfig
-import io.glutenproject.backendsapi.BackendsApiManager
-import io.glutenproject.execution.{FileSourceScanExecTransformer, WholeStageTransformer}
-import io.glutenproject.utils.SystemParameters
-import io.glutenproject.vectorized.JniLibLoader
+import org.apache.gluten.GlutenConfig
+import org.apache.gluten.execution.{FileSourceScanExecTransformer, WholeStageTransformer}
+import org.apache.gluten.extension.columnar.transition.Transitions
+import org.apache.gluten.jni.JniLibLoader
+import org.apache.gluten.utils.{BackendTestUtils, SystemParameters}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.benchmark.Benchmark
@@ -61,11 +61,11 @@ object ParquetReadBenchmark extends SqlBasedBenchmark {
   def beforeAll(): Unit = {}
 
   override def getSparkSession: SparkSession = {
-    beforeAll();
+    beforeAll()
     val conf = new SparkConf()
       .setAppName("ParquetReadBenchmark")
       .setIfMissing("spark.master", s"local[$thrdNum]")
-      .set("spark.plugins", "io.glutenproject.GlutenPlugin")
+      .set("spark.plugins", "org.apache.gluten.GlutenPlugin")
       .set("spark.shuffle.manager", "org.apache.spark.shuffle.sort.ColumnarShuffleManager")
       .set("spark.memory.offHeap.enabled", "true")
       .setIfMissing("spark.memory.offHeap.size", offheapSize)
@@ -77,12 +77,11 @@ object ParquetReadBenchmark extends SqlBasedBenchmark {
       .setIfMissing("spark.sql.files.maxPartitionBytes", "1G")
       .setIfMissing("spark.sql.files.openCostInBytes", "1073741824")
 
-    if (BackendsApiManager.chBackend) {
+    if (BackendTestUtils.isCHBackendLoaded()) {
       conf
         .set("spark.io.compression.codec", "LZ4")
         .set("spark.gluten.sql.enable.native.validation", "false")
         .set("spark.gluten.sql.columnar.backend.ch.worker.id", "1")
-        .set("spark.gluten.sql.columnar.backend.ch.use.v2", "false")
         .set("spark.gluten.sql.columnar.separate.scan.rdd.for.ch", "false")
         .setIfMissing(GlutenConfig.GLUTEN_LIB_PATH, SystemParameters.getClickHouseLibPath)
         .set(
@@ -100,25 +99,21 @@ object ParquetReadBenchmark extends SqlBasedBenchmark {
   override def runBenchmarkSuite(mainArgs: Array[String]): Unit = {
     val (parquetDir, scanSchema, executedCnt, executedVanilla) =
       if (mainArgs.isEmpty) {
-        (
-          "/data/tpch-data-sf10/lineitem",
-          "l_orderkey,l_receiptdate",
-          5,
-          true)
+        ("/data/tpch-data-sf10/lineitem", "l_orderkey,l_receiptdate", 5, true)
       } else {
         (mainArgs(0), mainArgs(1), mainArgs(2).toInt, mainArgs(3).toBoolean)
       }
 
     val parquetReadDf = spark.sql(s"""
-                                 |select $scanSchema from parquet.`$parquetDir`
-                                 |
-                                 |""".stripMargin)
+                                     |select $scanSchema from parquet.`$parquetDir`
+                                     |
+                                     |""".stripMargin)
     // Get the `FileSourceScanExecTransformer`
     val fileScan = parquetReadDf.queryExecution.executedPlan.collect {
       case scan: FileSourceScanExecTransformer => scan
     }.head
 
-    val filePartitions = fileScan.getFlattenPartitions
+    val filePartitions = fileScan.getPartitions
       .map(_.asInstanceOf[FilePartition])
 
     val wholeStageTransform = parquetReadDf.queryExecution.executedPlan.collect {
@@ -129,17 +124,17 @@ object ParquetReadBenchmark extends SqlBasedBenchmark {
     val newWholeStage = wholeStageTransform.withNewChildren(Seq(fileScan))
 
     // generate ColumnarToRow
-    val columnarToRowPlan =
-      BackendsApiManager.getSparkPlanExecApiInstance.genColumnarToRowExec(newWholeStage)
+    val columnarToRowPlan = Transitions.toRowPlan(newWholeStage)
 
     val newWholeStageRDD = newWholeStage.executeColumnar()
     val newColumnarToRowRDD = columnarToRowPlan.execute()
 
     // Get the total row count
     val totalRowCnt = newWholeStageRDD
-      .mapPartitionsInternal(batches => {
-        batches.map(batch => batch.numRows().toLong)
-      })
+      .mapPartitionsInternal(
+        batches => {
+          batches.map(batch => batch.numRows().toLong)
+        })
       .collect()
       .sum
 
@@ -170,7 +165,7 @@ object ParquetReadBenchmark extends SqlBasedBenchmark {
     }
 
     if (executedVanilla) {
-      spark.conf.set("spark.gluten.enabled", "false")
+      spark.conf.set(GlutenConfig.GLUTEN_ENABLED.key, "false")
 
       val vanillaParquet = spark.sql(s"""
                                         |select $scanSchema from parquet.`$parquetDir`
@@ -184,7 +179,7 @@ object ParquetReadBenchmark extends SqlBasedBenchmark {
       val fileScan = vanillaScanPlan.head
       val fileScanOutput = fileScan.output
       val relation = fileScan.relation
-      val readFile: (PartitionedFile) => Iterator[InternalRow] =
+      val readFile: PartitionedFile => Iterator[InternalRow] =
         relation.fileFormat.buildReaderWithPartitionValues(
           sparkSession = relation.sparkSession,
           dataSchema = relation.dataSchema,
@@ -230,11 +225,9 @@ object ParquetReadBenchmark extends SqlBasedBenchmark {
   }
 
   override def afterAll(): Unit = {
-    if (BackendsApiManager.chBackend) {
-      val libPath = spark.conf.get(
-        GlutenConfig.GLUTEN_LIB_PATH,
-        SystemParameters
-          .getClickHouseLibPath)
+    if (BackendTestUtils.isCHBackendLoaded()) {
+      val libPath =
+        spark.conf.get(GlutenConfig.GLUTEN_LIB_PATH, SystemParameters.getClickHouseLibPath)
       JniLibLoader.unloadFromPath(libPath)
     }
     super.afterAll()

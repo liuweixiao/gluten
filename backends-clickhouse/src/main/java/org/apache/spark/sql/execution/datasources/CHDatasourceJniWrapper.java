@@ -14,16 +14,63 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql.execution.datasources;
+
+import io.substrait.proto.WriteRel;
 
 public class CHDatasourceJniWrapper {
 
-  public native long nativeInitFileWriterWrapper(String filePath);
+  private final long instance;
 
-  //  public native void inspectSchema(long instanceId, long cSchemaAddress);
+  public CHDatasourceJniWrapper(String filePath, WriteRel write) {
+    this.instance = createFilerWriter(filePath, write.toByteArray());
+  }
 
-  public native void write(long instanceId, long blockAddress);
+  public CHDatasourceJniWrapper(
+      String prefix, String partition, String bucket, WriteRel write, byte[] confArray) {
+    this.instance =
+        createMergeTreeWriter(prefix, partition, bucket, write.toByteArray(), confArray);
+  }
 
-  public native void close(long instanceId);
+  public void write(long blockAddress) {
+    write(instance, blockAddress);
+  }
+
+  public void close() {
+    close(instance);
+  }
+
+  private native void write(long instanceId, long blockAddress);
+
+  private native void close(long instanceId);
+
+  /// FileWriter
+  private native long createFilerWriter(String filePath, byte[] writeRel);
+
+  /// MergeTreeWriter
+  private native long createMergeTreeWriter(
+      String prefix, String partition, String bucket, byte[] writeRel, byte[] confArray);
+
+  public static native String nativeMergeMTParts(
+      byte[] splitInfo, String partition_dir, String bucket_dir);
+
+  public static native String filterRangesOnDriver(byte[] plan, byte[] read);
+
+  /**
+   * The input block is already sorted by partition columns + bucket expressions. (check
+   * org.apache.spark.sql.execution.datasources.FileFormatWriter#write) However, the input block may
+   * contain parts(we call it stripe here) belonging to different partition/buckets.
+   *
+   * <p>If bucketing is enabled, the input block's last column is guaranteed to be _bucket_value_.
+   *
+   * <p>This function splits the input block in to several blocks, each of which belonging to the
+   * same partition/bucket. Notice the stripe will NOT contain partition columns
+   *
+   * <p>Since all rows in a stripe share the same partition/bucket, we only need to check the
+   * heading row. So, for each stripe, the native code also returns each stripe's first row's index.
+   * Caller can use these indices to get UnsafeRows from the input block, to help
+   * FileFormatDataWriter to aware partition/bucket changes.
+   */
+  public static native BlockStripes splitBlockByPartitionAndBucket(
+      long blockAddress, int[] partitionColIndices, boolean hasBucket);
 }

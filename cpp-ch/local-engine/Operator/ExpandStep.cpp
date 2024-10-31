@@ -1,3 +1,19 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include "ExpandStep.h"
 #include <memory>
 #include <Columns/ColumnNullable.h>
@@ -6,7 +22,7 @@
 #include <Core/ColumnsWithTypeAndName.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypesNumber.h>
-#include <Operator/ExpandTransorm.h>
+#include <Operator/ExpandTransform.h>
 #include <Processors/IProcessor.h>
 #include <QueryPipeline/Pipe.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
@@ -28,30 +44,24 @@ static DB::ITransformingStep::Traits getTraits()
         }};
 }
 
-ExpandStep::ExpandStep(const DB::DataStream & input_stream_, const ExpandField & project_set_exprs_)
-    : DB::ITransformingStep(input_stream_, buildOutputHeader(input_stream_.header, project_set_exprs_), getTraits())
+ExpandStep::ExpandStep(const DB::Block & input_header, const ExpandField & project_set_exprs_)
+    : DB::ITransformingStep(input_header, buildOutputHeader(input_header, project_set_exprs_), getTraits())
     , project_set_exprs(project_set_exprs_)
 {
-    header = input_stream_.header;
-    output_header = getOutputStream().header;
 }
 
-DB::Block ExpandStep::buildOutputHeader(const DB::Block & , const ExpandField & project_set_exprs_)
+DB::Block ExpandStep::buildOutputHeader(const DB::Block &, const ExpandField & project_set_exprs_)
 {
     DB::ColumnsWithTypeAndName cols;
     const auto & types = project_set_exprs_.getTypes();
     const auto & names = project_set_exprs_.getNames();
 
+    chassert(names.size() == types.size());
+
     for (size_t i = 0; i < project_set_exprs_.getExpandCols(); ++i)
-    {
-        String col_name;
-        if (!names[i].empty())
-            col_name = names[i];
-        else
-            col_name = "expand_" + std::to_string(i);
-        cols.push_back(DB::ColumnWithTypeAndName(types[i], col_name));
-    }
-    return DB::Block(cols);
+        cols.emplace_back(DB::ColumnWithTypeAndName(types[i], names[i]));
+
+    return DB::Block(std::move(cols));
 }
 
 void ExpandStep::transformPipeline(DB::QueryPipelineBuilder & pipeline, const DB::BuildQueryPipelineSettings & /*settings*/)
@@ -61,7 +71,7 @@ void ExpandStep::transformPipeline(DB::QueryPipelineBuilder & pipeline, const DB
         DB::Processors new_processors;
         for (auto & output : outputs)
         {
-            auto expand_op = std::make_shared<ExpandTransform>(header, output_header, project_set_exprs);
+            auto expand_op = std::make_shared<ExpandTransform>(input_headers.front(), *output_header, project_set_exprs);
             new_processors.push_back(expand_op);
             DB::connect(*output, expand_op->getInputs().front());
         }
@@ -76,9 +86,9 @@ void ExpandStep::describePipeline(DB::IQueryPlanStep::FormatSettings & settings)
         DB::IQueryPlanStep::describePipeline(processors, settings);
 }
 
-void ExpandStep::updateOutputStream()
+void ExpandStep::updateOutputHeader()
 {
-    createOutputStream(input_streams.front(), output_header, getDataStreamTraits());
+    output_header = buildOutputHeader(input_headers.front(), project_set_exprs);
 }
 
 }

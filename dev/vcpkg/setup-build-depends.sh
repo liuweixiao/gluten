@@ -8,7 +8,7 @@ function semver {
     echo "$@" | awk -F. '{ printf("%d%03d%03d", $1,$2,$3); }'
 }
 
-install_centos_any_maven() {
+install_maven_from_source() {
     if [ -z "$(which mvn)" ]; then
         maven_version=3.9.2
         maven_install_dir=/opt/maven-$maven_version
@@ -18,26 +18,65 @@ install_centos_any_maven() {
         fi
 
         cd /tmp
-        wget https://downloads.apache.org/maven/maven-3/$maven_version/binaries/apache-maven-$maven_version-bin.tar.gz
+        wget https://archive.apache.org/dist/maven/maven-3/$maven_version/binaries/apache-maven-$maven_version-bin.tar.gz
         tar -xvf apache-maven-$maven_version-bin.tar.gz
-        rm apache-maven-$maven_version-bin.tar.gz
+        rm -f apache-maven-$maven_version-bin.tar.gz
         mv apache-maven-$maven_version "${maven_install_dir}"
         ln -s "${maven_install_dir}/bin/mvn" /usr/local/bin/mvn
     fi
 }
 
+install_gcc11_from_source() {
+     cur_gcc_version=$(gcc -dumpversion)
+     if [ "$(semver "$cur_gcc_version")" -lt "$(semver 11.0.0)" ]; then
+            gcc_version=gcc-11.5.0
+            gcc_install_dir=/usr/local/${gcc_version}
+            cd /tmp
+            if [ ! -d $gcc_version ]; then
+                wget https://ftp.gnu.org/gnu/gcc/${gcc_version}/${gcc_version}.tar.gz
+                tar -xvf ${gcc_version}.tar.gz
+            fi
+            cd ${gcc_version}
+            ./contrib/download_prerequisites
+
+            mkdir gcc-build && cd gcc-build
+            ../configure --prefix=${gcc_install_dir} --disable-multilib --enable-languages=c,c++
+            make -j$(nproc)
+            make install
+
+            update-alternatives --install /usr/bin/gcc gcc /usr/local/${gcc_version}/bin/gcc 900 --slave /usr/bin/g++ g++ /usr/local/${gcc_version}/bin/g++
+     fi
+}
+
 install_centos_7() {
     export PATH=/usr/local/bin:$PATH
 
+    sed -i \
+        -e 's/^mirrorlist/#mirrorlist/' \
+        -e 's/^# *baseurl *=/baseurl=/' \
+        -e 's/mirror\.centos\.org/vault.centos.org/' \
+        /etc/yum.repos.d/*.repo
+
     yum -y install epel-release centos-release-scl
+    sed -i \
+        -e 's/^mirrorlist/#mirrorlist/' \
+        -e 's/^# *baseurl *=/baseurl=/' \
+        -e 's/mirror\.centos\.org/vault.centos.org/' \
+        /etc/yum.repos.d/*.repo
+
     yum -y install \
-        wget curl tar zip unzip which \
-        cmake3 ninja-build perl-IPC-Cmd autoconf autoconf-archive automake libtool \
-        devtoolset-9 \
+        wget curl tar zip unzip which patch sudo \
+        ninja-build perl-IPC-Cmd autoconf autoconf-archive automake libtool \
+        devtoolset-11 python3 pip dnf \
         bison \
         java-1.8.0-openjdk java-1.8.0-openjdk-devel
 
-    # git>2.7.4
+    pip3 install --upgrade pip
+
+    # Requires cmake >= 3.28.3
+    pip3 install cmake==3.28.3
+
+    # Requires git >= 2.7.4
     if [[ "$(git --version)" != "git version 2."* ]]; then
         [ -f /etc/yum.repos.d/ius.repo ] || yum -y install https://repo.ius.io/ius-release-el7.rpm
         yum -y remove git
@@ -73,26 +112,40 @@ install_centos_7() {
         echo /usr/share/aclocal > /usr/local/share/aclocal/dirlist
     fi
 
-    install_centos_any_maven
+    install_maven_from_source
 }
 
 install_centos_8() {
+    sed -i \
+        -e 's/^mirrorlist/#mirrorlist/' \
+        -e 's/^# *baseurl *=/baseurl=/' \
+        -e 's/mirror\.centos\.org/vault.centos.org/' \
+        /etc/yum.repos.d/*.repo
+
     yum -y install \
-        wget curl tar zip unzip git which \
-        cmake ninja-build perl-IPC-Cmd autoconf autoconf-archive automake libtool \
-        gcc-toolset-9-gcc gcc-toolset-9-gcc-c++ \
+        wget curl tar zip unzip git which sudo patch \
+        cmake perl-IPC-Cmd autoconf automake libtool \
+        gcc-toolset-11 \
         flex bison python3 \
         java-1.8.0-openjdk java-1.8.0-openjdk-devel
 
-    install_centos_any_maven
+    dnf -y --enablerepo=powertools install autoconf-archive ninja-build
+
+    install_maven_from_source
 }
 
 install_ubuntu_20.04() {
-    apt-get -y install \
+    apt-get update && apt-get -y install \
         wget curl tar zip unzip git \
         build-essential ccache cmake ninja-build pkg-config autoconf autoconf-archive libtool \
         flex bison \
         openjdk-8-jdk maven
+    # Overwrite gcc-9 installed by build-essential.
+    sudo apt install -y software-properties-common
+    sudo add-apt-repository ppa:ubuntu-toolchain-r/test
+    sudo apt update && sudo apt install -y gcc-11 g++-11
+    sudo ln -sf /usr/bin/gcc-11 /usr/bin/gcc
+    sudo ln -sf /usr/bin/g++-11 /usr/bin/g++
 }
 
 install_ubuntu_22.04() { install_ubuntu_20.04; }
@@ -104,6 +157,52 @@ install_alinux_3() {
         cmake ninja-build perl-IPC-Cmd autoconf autoconf-archive automake libtool \
         libstdc++-static flex bison python3 \
         java-1.8.0-openjdk java-1.8.0-openjdk-devel
+}
+
+install_tencentos_3.2() {
+    yum -y install \
+        wget curl tar zip unzip git which \
+        cmake ninja-build perl-IPC-Cmd autoconf autoconf-archive automake libtool \
+        gcc-toolset-11 \
+        flex bison python3 \
+        java-8-konajdk
+
+    install_maven_from_source
+}
+
+install_debian_10() {
+    apt-get -y install \
+        wget curl tar zip unzip git apt-transport-https \
+        build-essential ccache cmake ninja-build pkg-config autoconf autoconf-archive libtool \
+        flex bison python3
+
+    # Download the Eclipse Adoptium GPG key
+    wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor | tee /etc/apt/trusted.gpg.d/adoptium.gpg > /dev/null
+
+    # Configure the Eclipse Adoptium repository
+    echo "deb https://packages.adoptium.net/artifactory/deb $(awk -F= '/^VERSION_CODENAME/{print$2}' /etc/os-release) main" | tee /etc/apt/sources.list.d/adoptium.list
+
+    # Install JDK
+    apt update && apt-get -y install temurin-8-jdk
+
+    install_maven_from_source
+    install_gcc11_from_source
+}
+
+install_debian_11() {
+    apt-get -y install \
+        wget curl tar zip unzip git apt-transport-https \
+        build-essential ccache cmake ninja-build pkg-config autoconf autoconf-archive libtool \
+        flex bison
+
+    # Download the Eclipse Adoptium GPG key
+    wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor | tee /etc/apt/trusted.gpg.d/adoptium.gpg > /dev/null
+
+    # Configure the Eclipse Adoptium repository
+    echo "deb https://packages.adoptium.net/artifactory/deb $(awk -F= '/^VERSION_CODENAME/{print$2}' /etc/os-release) main" | tee /etc/apt/sources.list.d/adoptium.list
+
+    # Install JDK
+    apt update && apt-get -y install temurin-8-jdk
 }
 
 ## Install function end
